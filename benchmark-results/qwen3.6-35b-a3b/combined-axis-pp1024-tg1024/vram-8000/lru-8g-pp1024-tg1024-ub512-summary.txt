@@ -1,0 +1,79 @@
+model: qwen35moe 35B.A3B Q4_K - Medium
+predictor: lru       cache: 8000 MB   ssd: /workspace/models
+n_prompt: 1024  n_gen: 1024  repeats: 1
+
+ubatch: requested=512 effective=512  slots=81/256/256  mode=streaming
+
+phase     tokens   total_ms   per_token_ms   tok/s
+prefill     1024     5571.7          5.44      184
+decode      1024    22483.8         21.96       46
+
+cache hit rate (prefill): 18.6%
+cache hit rate (decode): 95.0%
+SSD bytes read (decode): 29.31 GB  (avg 29.31 MB/token)
+TTFT: 5571.7 ms
+TTFT cold: 5571.7 ms  (n=1)
+TTFT warm: 0.0 ms  (n=0)
+TPOT: 21.96 ms
+total: 28055.5 ms
+
+I/O breakdown (prefill, mean per token):
+  ssd_read           4.28 ms
+  h2d                2.52 ms
+  gpu_compute        0.42 ms
+  stall (overlap loss)     0.38 ms
+  predictor          0.00 ms
+
+Profiler breakdown (prefill, mean per token):
+  predictor_observe     0.00 ms
+  predictor_score       0.00 ms
+  callback_wall         4.78 ms
+  topk_d2h              0.00 ms
+  slot_ids_h2d          0.00 ms
+  slot_table_h2d        0.00 ms
+  eamc_cosine           0.00 ms
+  eamc_materialize      0.00 ms
+  eamc_rows_scored       0.0 rows/token
+  eamc_cache_hits       0.00 hits/token
+  eamc_cache_misses     0.00 misses/token
+  request_end           0.05 ms
+  predictor_end         0.00 ms
+  predictor_save        0.00 ms
+  profile_flush         0.00 ms
+  sidecar_written       0.00 MB/token
+
+I/O breakdown (decode, mean per token):
+  ssd_read           8.72 ms
+  h2d                6.79 ms
+  gpu_compute        7.44 ms
+  stall (overlap loss)     1.51 ms
+  predictor          0.03 ms
+
+Profiler breakdown (decode, mean per token):
+  predictor_observe     0.00 ms
+  predictor_score       0.03 ms
+  callback_wall        11.16 ms
+  topk_d2h              0.30 ms
+  slot_ids_h2d          0.22 ms
+  slot_table_h2d        0.00 ms
+  eamc_cosine           0.00 ms
+  eamc_materialize      0.00 ms
+  eamc_rows_scored       0.0 rows/token
+  eamc_cache_hits       0.00 hits/token
+  eamc_cache_misses     0.00 misses/token
+  request_end           0.26 ms
+  predictor_end         0.00 ms
+  predictor_save        0.00 ms
+  profile_flush         0.02 ms
+  sidecar_written       0.00 MB/token
+
+Wall/profile reconciliation (decode):
+  wall_decode_us        22483785
+  profiled_decode_us    25336317
+  unattributed_decode_us -2852532
+
+VRAM peak (process approx): 11.36 GB / 44.39 GB  (baseline-adjusted; experts budget: 7.81 GB, non-expert/process overhead: 3.54 GB)
+VRAM device used: baseline=0.29 GB, peak=11.64 GB  (whole visible GPU(s), includes other processes)
+DRAM peak (process): 1.34 GB
+SSD reads: 49485 (avg 0.61 MB each, avg latency 0.18 ms)
+profile rows: prefill=80 decode=40960

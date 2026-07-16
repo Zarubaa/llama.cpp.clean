@@ -1,5 +1,10 @@
 #include "llama-context.h"
 
+#ifdef LLAMA_MOE_OFFLOAD
+#include "moe-offload/runtime.h"
+#include "moe-offload/slot_pool.h"
+#endif
+
 #include "ggml.h"
 #include "llama-arch.h"
 #include "llama-graph.h"
@@ -14,10 +19,56 @@
 
 #include <cinttypes>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
+
+#ifdef LLAMA_MOE_OFFLOAD
+static bool llama_moe_env_is_off(const char * value) {
+    return value &&
+        (strcmp(value, "0") == 0 ||
+         strcmp(value, "off") == 0 ||
+         strcmp(value, "OFF") == 0 ||
+         strcmp(value, "false") == 0 ||
+         strcmp(value, "FALSE") == 0 ||
+         strcmp(value, "disabled") == 0 ||
+         strcmp(value, "DISABLED") == 0);
+}
+
+static float llama_moe_ubatch_safety() {
+    const char * value = getenv("LLAMA_MOE_UBATCH_SAFETY");
+    if (!value || !value[0]) {
+        return 1.0f;
+    }
+    char * end = nullptr;
+    const float parsed = strtof(value, &end);
+    if (end == value || !std::isfinite(parsed) || parsed <= 0.0f) {
+        LLAMA_LOG_WARN("%s: ignoring invalid LLAMA_MOE_UBATCH_SAFETY=%s\n", __func__, value);
+        return 1.0f;
+    }
+    return parsed;
+}
+
+static uint32_t llama_moe_fixed_ubatch_from_env(uint32_t n_batch, bool * has_fixed) {
+    *has_fixed = false;
+    const char * value = getenv("LLAMA_MOE_STREAMING_UBATCH");
+    if (!value || !value[0] || strcmp(value, "auto") == 0 || strcmp(value, "AUTO") == 0 || llama_moe_env_is_off(value)) {
+        return 0;
+    }
+
+    char * end = nullptr;
+    const unsigned long parsed = strtoul(value, &end, 10);
+    if (end == value || parsed == 0) {
+        LLAMA_LOG_WARN("%s: ignoring invalid LLAMA_MOE_STREAMING_UBATCH=%s\n", __func__, value);
+        return 0;
+    }
+
+    *has_fixed = true;
+    return std::min<uint32_t>(n_batch, (uint32_t) parsed);
+}
+#endif
 
 //
 // llama_context
@@ -239,6 +290,29 @@ llama_context::llama_context(
     cparams.n_batch = cparams.causal_attn ? std::min(cparams.n_ctx, params.n_batch) : params.n_batch;
 
     cparams.n_ubatch = std::min(cparams.n_batch, params.n_ubatch == 0 ? params.n_batch : params.n_ubatch);
+
+#ifdef LLAMA_MOE_OFFLOAD
+    if (llama_moe::runtime_enabled() && llama_moe::streaming_mode()) {
+        const uint32_t requested = cparams.n_ubatch;
+        bool has_fixed = false;
+        const uint32_t fixed = llama_moe_fixed_ubatch_from_env(cparams.n_batch, &has_fixed);
+
+        if (llama_moe_env_is_off(getenv("LLAMA_MOE_STREAMING_UBATCH"))) {
+            LLAMA_LOG_INFO("%s: MoE streaming ubatch auto-sizing disabled: requested=%u active_slots=%u experts=%u top_k=%u\n",
+                    __func__, requested, llama_moe::active_slots_per_layer(), llama_moe::n_experts_per_layer(), hparams.n_expert_used);
+        } else if (has_fixed) {
+            cparams.n_ubatch = fixed;
+            LLAMA_LOG_INFO("%s: MoE streaming ubatch fixed by LLAMA_MOE_STREAMING_UBATCH: requested=%u effective=%u active_slots=%u experts=%u top_k=%u\n",
+                    __func__, requested, cparams.n_ubatch, llama_moe::active_slots_per_layer(), llama_moe::n_experts_per_layer(), hparams.n_expert_used);
+        } else {
+            const float safety = llama_moe_ubatch_safety();
+            const uint32_t adaptive = llama_moe::recommended_ubatch(requested, hparams.n_expert_used, safety);
+            cparams.n_ubatch = adaptive;
+            LLAMA_LOG_INFO("%s: MoE streaming ubatch auto-sized: requested=%u effective=%u active_slots=%u experts=%u top_k=%u safety=%.3g\n",
+                    __func__, requested, cparams.n_ubatch, llama_moe::active_slots_per_layer(), llama_moe::n_experts_per_layer(), hparams.n_expert_used, (double) safety);
+        }
+    }
+#endif
 
     cparams.n_outputs_max = params.n_outputs_max == 0 || llama_model_has_encoder(&model) ? cparams.n_batch : params.n_outputs_max;
 
@@ -1312,7 +1386,36 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         res->reset();
 
         ggml_backend_sched_reset(sched.get());
+#ifdef LLAMA_MOE_OFFLOAD
+        if (llama_moe::runtime_enabled()) {
+            llama_moe::reset_graph_state();
+        }
+        if (llama_moe::runtime_enabled() && llama_moe::streaming_mode()) {
+            ggml_backend_sched_set_eval_callback(sched.get(), llama_moe::moe_eval_callback, nullptr);
+
+            static bool io_inited = false;
+            if (!io_inited) {
+                io_inited = true;
+                llama_moe::slot_pool_init_io(llama_moe::get_manifest().source_path);
+
+                ggml_backend_t cuda_be = nullptr;
+                const int n_be = ggml_backend_sched_get_n_backends(sched.get());
+                for (int i = 0; i < n_be; ++i) {
+                    ggml_backend_t be = ggml_backend_sched_get_backend(sched.get(), i);
+                    const char * name = be ? ggml_backend_name(be) : nullptr;
+                    if (name && strncmp(name, "CUDA", 4) == 0) {
+                        cuda_be = be;
+                        break;
+                    }
+                }
+                llama_moe::slot_pool_set_compute_backend(cuda_be);
+            }
+        } else {
+            ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
+        }
+#else
         ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
+#endif
 
         //const auto t_start_us = ggml_time_us();
 
@@ -1673,6 +1776,25 @@ int llama_context::decode(const llama_batch & batch_inp) {
         LLAMA_LOG_ERROR("%s: n_tokens == 0\n", __func__);
         return -1;
     }
+
+#ifdef LLAMA_MOE_OFFLOAD
+    struct llama_moe_request_guard {
+        bool active = false;
+
+        llama_moe_request_guard() {
+            active = llama_moe::runtime_enabled();
+            if (active) {
+                llama_moe::begin_request();
+            }
+        }
+
+        ~llama_moe_request_guard() {
+            if (active) {
+                llama_moe::end_request();
+            }
+        }
+    } llama_moe_request_scope;
+#endif
 
     const auto & vocab   = model.vocab;
     const auto & hparams = model.hparams;

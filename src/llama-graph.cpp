@@ -1,5 +1,10 @@
 #include "llama-graph.h"
 
+#ifdef LLAMA_MOE_OFFLOAD
+#include "moe-offload/runtime.h"
+#include "moe-offload/slot_pool.h"
+#endif
+
 #include "llama-impl.h"
 #include "llama-model.h"
 #include "llama-batch.h"
@@ -16,6 +21,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <numeric>
 #include <sstream>
 #include <string>
@@ -1916,6 +1922,14 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(selected_experts->src[0], "ffn_moe_argsort", il);
     }
     cb(selected_experts, "ffn_moe_topk", il);
+    ggml_tensor * routing_selected_experts = selected_experts;
+
+#ifdef LLAMA_MOE_OFFLOAD
+    ggml_tensor * slot_selected_experts = llama_moe::remap_selected_experts(
+            ctx0, selected_experts, il, n_expert, n_expert_used);
+#else
+    ggml_tensor * slot_selected_experts = selected_experts;
+#endif
 
     if (arch == LLM_ARCH_GROVEMOE && n_expert != hparams.n_expert) {
         // TODO: Use scalar div instead when/if implemented
@@ -1957,6 +1971,15 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(weights, "ffn_moe_weights_scaled", il);
     }
 
+#ifdef LLAMA_MOE_OFFLOAD
+    {
+        const char * topk_diag = std::getenv("LLAMA_MOE_TOPK_FUSION_DIAG");
+        if (topk_diag && topk_diag[0] != '\0' && std::strcmp(topk_diag, "0") != 0 && n_tokens == 1) {
+            llama_moe::register_weights_for_topk(il, routing_selected_experts, weights);
+        }
+    }
+#endif
+
     //call early so that topk-moe can be used
     ggml_build_forward_expand(gf, weights);
 
@@ -1974,7 +1997,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
     if (gate_up_exps) {
         // merged gate_up path: one mul_mat_id, then split into gate and up views
-        ggml_tensor * gate_up = build_lora_mm_id(gate_up_exps, cur, selected_experts, up_exps_s); // [n_ff*2, n_expert_used, n_tokens]
+        ggml_tensor * gate_up = build_lora_mm_id(gate_up_exps, cur, slot_selected_experts, up_exps_s); // [n_ff*2, n_expert_used, n_tokens]
         cb(gate_up, "ffn_moe_gate_up", il);
 
         if (up_exps_s) {
@@ -1993,7 +2016,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(up, "ffn_moe_up", il);
     } else {
         // separate gate and up path
-        up = build_lora_mm_id(up_exps, cur, selected_experts, up_exps_s); // [n_ff, n_expert_used, n_tokens]
+        up = build_lora_mm_id(up_exps, cur, slot_selected_experts, up_exps_s); // [n_ff, n_expert_used, n_tokens]
         cb(up, "ffn_moe_up", il);
 
         if (up_exps_s) {
@@ -2006,7 +2029,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         }
 
         if (gate_exps) {
-            cur = build_lora_mm_id(gate_exps, cur, selected_experts, gate_exps_s); // [n_ff, n_expert_used, n_tokens]
+            cur = build_lora_mm_id(gate_exps, cur, slot_selected_experts, gate_exps_s); // [n_ff, n_expert_used, n_tokens]
             cb(cur, "ffn_moe_gate", il);
         } else {
             cur = up;
@@ -2095,7 +2118,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
             GGML_ABORT("fatal error");
     }
 
-    experts = build_lora_mm_id(down_exps, cur, selected_experts, down_exps_s); // [n_embd, n_expert_used, n_tokens]
+    experts = build_lora_mm_id(down_exps, cur, slot_selected_experts, down_exps_s); // [n_embd, n_expert_used, n_tokens]
     cb(experts, "ffn_moe_down", il);
 
     if (down_exps_s) {

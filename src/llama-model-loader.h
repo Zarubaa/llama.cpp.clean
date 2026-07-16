@@ -182,6 +182,18 @@ struct llama_model_loader {
         const llama_hparams & hparams, const buft_list_t * buft_list_cpu, const buft_list_t * buft_list_input, const buft_list_t * buft_list_output,
         const buft_list_t * buft_list_layer, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags);
 
+    // Allocate a tensor in the loader's per-buft ctx_map that does not come
+    // from any source GGUF tensor. Used by MoE offload for GPU-resident slot
+    // tensors that are filled from SSD on demand.
+    struct ggml_tensor * create_unfiled_tensor(
+        const llama_hparams & hparams, const buft_list_t * buft_list_layer,
+        const std::string & name, ggml_type type, ggml_op op,
+        const std::initializer_list<int64_t> & ne);
+
+    // Account for a GGUF tensor that the offload runtime will load manually
+    // instead of through load_all_data.
+    void mark_tensor_unloaded(const std::string & name);
+
     struct ggml_tensor * create_tensor_as_view(struct ggml_context * ctx, struct ggml_tensor * base, const std::string & name, const std::initializer_list<int64_t> & ne, size_t offset, bool required = true);
 
     void done_getting_tensors(bool partial = false) const;
