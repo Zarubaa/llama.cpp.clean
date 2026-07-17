@@ -38,6 +38,13 @@ struct profile_row {
     uint64_t ssd_reads = 0;
     int cache_resident_experts = 0;
     std::string predictor = "lru";
+    uint64_t routes_required = 0;
+    uint64_t routes_hit = 0;
+    uint64_t routes_persistent = 0;
+    uint64_t k_empty_admit = 0;
+    uint64_t k_victim_admit = 0;
+    uint64_t k_scratch = 0;
+    int64_t route_rank_us = 0;
 };
 
 struct profile_request_row {
@@ -84,6 +91,13 @@ struct profile_phase_stats {
     int64_t profile_flush_us = 0;
     uint64_t sidecar_write_bytes = 0;
     int cache_resident_peak = 0;
+    uint64_t routes_required = 0;
+    uint64_t routes_hit = 0;
+    uint64_t routes_persistent = 0;
+    uint64_t k_empty_admit = 0;
+    uint64_t k_victim_admit = 0;
+    uint64_t k_scratch = 0;
+    int64_t route_rank_us = 0;
 };
 
 struct profile_snapshot {

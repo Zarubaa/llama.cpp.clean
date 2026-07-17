@@ -116,6 +116,12 @@ function(llama_build_and_test source)
     set_property(TEST ${TEST_TARGET} PROPERTY LABELS ${LLAMA_TEST_LABEL})
 endfunction()
 
+if (LLAMA_MOE_OFFLOAD)
+    llama_build(test-moe-admission.cpp)
+    target_include_directories(test-moe-admission PRIVATE ${PROJECT_SOURCE_DIR}/src)
+    llama_test(test-moe-admission)
+endif()
+
 # build test-tokenizer-0 target once and add many tests
 llama_build(test-tokenizer-0.cpp)
 

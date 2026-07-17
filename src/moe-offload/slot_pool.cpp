@@ -1,5 +1,6 @@
 #include "slot_pool.h"
 
+#include "admission.h"
 #include "io.h"
 #include "loader.h"
 #include "predictor.h"
@@ -287,6 +288,11 @@ bool debug_load_trace() {
     static const bool enabled =
         std::getenv("LLAMA_MOE_DEBUG_LOADS") != nullptr ||
         debug_d4_trace();
+    return enabled;
+}
+
+bool debug_admission() {
+    static const bool enabled = std::getenv("LLAMA_MOE_DEBUG_ADMISSION") != nullptr;
     return enabled;
 }
 
@@ -1280,21 +1286,37 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
     }
     const uint64_t row_token_idx = s.current_token_idx;
 
-    // Collect unique experts.
-    std::unordered_set<int32_t> uniq;
-    uniq.reserve(ids.size());
-    for (int32_t e : ids) {
-        if (e >= 0 && (uint32_t) e < mf.n_experts_per_layer) uniq.insert(e);
+    // Count route occurrences and rank unique experts deterministically. The
+    // ranking controls which misses get scarce EMPTY persistent slots during
+    // cache warmup; it does not change the mapping needed by this callback.
+    const auto route_rank_start = std::chrono::steady_clock::now();
+    const std::vector<routed_expert> ranked = rank_routed_experts(ids, mf.n_experts_per_layer);
+    std::vector<int32_t> uniq;
+    uniq.reserve(ranked.size());
+    for (const routed_expert & route : ranked) {
+        uniq.push_back(route.id);
     }
+
+    // Predictor observations retain the raw multiplicity. LRU assigns one
+    // step to the callback as before; EAMC now sees token-weighted iEAM counts.
+    std::vector<int> observed_routes;
+    observed_routes.reserve(ids.size());
+    for (int32_t e : ids) {
+        if (e >= 0 && (uint32_t) e < mf.n_experts_per_layer) {
+            observed_routes.push_back((int) e);
+        }
+    }
+    const auto route_rank_end = std::chrono::steady_clock::now();
+    const int64_t route_rank_us = elapsed_us(route_rank_start, route_rank_end);
+    const uint64_t routes_required = (uint64_t) observed_routes.size();
 
     int64_t pred_observe_us = 0;
     int64_t pred_score_us = 0;
 
     // Phase E-3: observe expert usage for predictor.
     {
-        std::vector<int> obs(uniq.begin(), uniq.end());
         const auto pred_start = std::chrono::steady_clock::now();
-        s.pred->observe(logical, obs);
+        s.pred->observe(logical, observed_routes);
         const auto pred_end = std::chrono::steady_clock::now();
         pred_observe_us += elapsed_us(pred_start, pred_end);
     }
@@ -1377,13 +1399,15 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
         }
     }
 
-    for (int32_t e : uniq) {
+    uint64_t routes_hit = 0;
+    for (const routed_expert & route : ranked) {
+        const int32_t e = route.id;
         auto it = lc.exp2slot.find(e);
         if (it != lc.exp2slot.end()) {
-            lru_touch(lc, e);
             call_exp2slot[e] = (int32_t) persistent_global_slot(s, (uint32_t) logical, (uint32_t) it->second);
             ++s.cache_hits;
             ++dbg_hits;
+            routes_hit += route.count;
         }
     }
 
@@ -1475,10 +1499,17 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
             float best_score = 1e30f;
             int32_t best_victim = -1;
             const auto pred_start = std::chrono::steady_clock::now();
-            for (const auto & [exp, sl] : lc.exp2slot) {
+            // Visit the real LRU tail first. With strict score comparison this
+            // makes equal predictor scores deterministically evict the oldest
+            // resident instead of depending on unordered_map iteration order.
+            for (auto it = lc.lru.rbegin(); it != lc.lru.rend(); ++it) {
+                const int32_t exp = *it;
                 if (reserved_this_call.count(exp)) continue;
                 float sc = s.pred->score(logical, exp);
-                if (sc < best_score) { best_score = sc; best_victim = exp; }
+                if (best_victim < 0 || sc < best_score) {
+                    best_score = sc;
+                    best_victim = exp;
+                }
             }
             const auto pred_end = std::chrono::steady_clock::now();
             pred_score_us += elapsed_us(pred_start, pred_end);
@@ -1559,12 +1590,59 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
         if (persistent_slot) {
             lc.slot_to_expert[local_slot] = e;
             lc.exp2slot[e] = local_slot;
-            lru_touch(lc, e);
             reserved_this_call.insert(e);
         }
         ++s.cache_misses;
         ++misses_loaded;
         ++dbg_misses;
+    }
+
+    // lru_touch() pushes to the front. Touch low-ranked experts first so the
+    // highest-frequency routed expert ends this callback at the MRU end.
+    for (auto it = ranked.rbegin(); it != ranked.rend(); ++it) {
+        if (lc.exp2slot.count(it->id)) {
+            lru_touch(lc, it->id);
+        }
+    }
+
+    uint64_t routes_persistent = 0;
+    for (const routed_expert & route : ranked) {
+        const auto it = call_exp2slot.find(route.id);
+        GGML_ASSERT(it != call_exp2slot.end());
+        if ((uint32_t) it->second < scratch_begin) {
+            routes_persistent += route.count;
+        }
+    }
+
+    GGML_ASSERT(dbg_hits + misses_loaded == (int) uniq.size());
+    GGML_ASSERT(dbg_free_alloc + dbg_evictions + dbg_scratch_alloc == misses_loaded);
+    GGML_ASSERT(routes_hit <= routes_persistent && routes_persistent <= routes_required);
+
+    if (debug_admission() && row_token_idx == 0 && n_tokens > 1) {
+        std::ostringstream ranked_out;
+        std::ostringstream persistent_out;
+        bool has_persistent = false;
+        for (size_t i = 0; i < ranked.size(); ++i) {
+            if (i > 0) ranked_out << ',';
+            ranked_out << ranked[i].id << ':' << ranked[i].count;
+            const auto mapped = call_exp2slot.find(ranked[i].id);
+            if (mapped != call_exp2slot.end() && (uint32_t) mapped->second < scratch_begin) {
+                if (has_persistent) persistent_out << ',';
+                persistent_out << ranked[i].id << ':' << ranked[i].count;
+                has_persistent = true;
+            }
+        }
+        fprintf(stderr, "[moe-admission] L%d routes=%llu uniq=%zu persistent_routes=%llu "
+                "empty=%d victim=%d scratch=%d ranked=%s persistent=%s\n",
+                logical,
+                (unsigned long long) routes_required,
+                ranked.size(),
+                (unsigned long long) routes_persistent,
+                dbg_free_alloc,
+                dbg_evictions,
+                dbg_scratch_alloc,
+                ranked_out.str().c_str(),
+                persistent_out.str().c_str());
     }
 
     if (std::getenv("LLAMA_MOE_DEBUG_EVICT")) {
@@ -1865,6 +1943,13 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
         p.row.ssd_reads = layer_load_stats.ssd_reads;
         p.row.cache_resident_experts = (int) lc.exp2slot.size();
         p.row.predictor = s.pred->name();
+        p.row.routes_required = routes_required;
+        p.row.routes_hit = routes_hit;
+        p.row.routes_persistent = routes_persistent;
+        p.row.k_empty_admit = (uint64_t) dbg_free_alloc;
+        p.row.k_victim_admit = (uint64_t) dbg_evictions;
+        p.row.k_scratch = (uint64_t) dbg_scratch_alloc;
+        p.row.route_rank_us = route_rank_us;
         p.h2d_events = std::move(h2d_events_for_row);
 
         // Phase I: record compute_begin on the compute stream right after

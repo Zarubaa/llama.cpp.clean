@@ -20,6 +20,10 @@ double hit_rate_percent(const profile_phase_stats & stats) {
     return stats.required == 0 ? 0.0 : 100.0 * (double) stats.hits / (double) stats.required;
 }
 
+double route_coverage_percent(uint64_t covered, uint64_t required) {
+    return required == 0 ? 0.0 : 100.0 * (double) covered / (double) required;
+}
+
 double us_per_token_ms(int64_t usec, int tokens, int repeats) {
     const int denom = std::max(1, tokens * repeats);
     return (double) usec / 1000.0 / (double) denom;
@@ -60,6 +64,8 @@ void append_profiler_breakdown(std::ostringstream & out, const char * label,
         << us_per_token_ms(stats.slot_ids_h2d_us, tokens, repeats) << " ms\n";
     out << "  slot_table_h2d    " << std::setw(8)
         << us_per_token_ms(stats.slot_table_h2d_us, tokens, repeats) << " ms\n";
+    out << "  route_rank        " << std::setw(8)
+        << us_per_token_ms(stats.route_rank_us, tokens, repeats) << " ms\n";
     out << "  eamc_cosine       " << std::setw(8)
         << us_per_token_ms(stats.eamc_cosine_us, tokens, repeats) << " ms\n";
     out << "  eamc_materialize  " << std::setw(8)
@@ -81,7 +87,13 @@ void append_profiler_breakdown(std::ostringstream & out, const char * label,
         << us_per_token_ms(stats.profile_flush_us, tokens, repeats) << " ms\n";
     out << "  sidecar_written   " << std::setw(8)
         << bytes_to_mib(safe_div((double) stats.sidecar_write_bytes, token_total))
-        << " MB/token\n\n";
+        << " MB/token\n";
+    out << "  empty_admit       " << std::setw(8)
+        << safe_div((double) stats.k_empty_admit, token_total) << " experts/token\n";
+    out << "  victim_admit      " << std::setw(8)
+        << safe_div((double) stats.k_victim_admit, token_total) << " experts/token\n";
+    out << "  scratch           " << std::setw(8)
+        << safe_div((double) stats.k_scratch, token_total) << " experts/token\n\n";
 }
 
 } // namespace
@@ -140,6 +152,13 @@ void profiler::record(const profile_row & row) {
     stats.eamc_score_materialize_us += row.eamc_score_materialize_us;
     stats.eamc_score_cache_hits += row.eamc_score_cache_hits;
     stats.eamc_score_cache_misses += row.eamc_score_cache_misses;
+    stats.routes_required += row.routes_required;
+    stats.routes_hit += row.routes_hit;
+    stats.routes_persistent += row.routes_persistent;
+    stats.k_empty_admit += row.k_empty_admit;
+    stats.k_victim_admit += row.k_victim_admit;
+    stats.k_scratch += row.k_scratch;
+    stats.route_rank_us += row.route_rank_us;
     if (row.cache_resident_experts > stats.cache_resident_peak) {
         stats.cache_resident_peak = row.cache_resident_experts;
     }
@@ -178,7 +197,14 @@ void profiler::record(const profile_row & row) {
             << 0 << ','
             << 0 << ','
             << 0 << ','
-            << 0 << '\n';
+            << 0 << ','
+            << row.routes_required << ','
+            << row.routes_hit << ','
+            << row.routes_persistent << ','
+            << row.k_empty_admit << ','
+            << row.k_victim_admit << ','
+            << row.k_scratch << ','
+            << row.route_rank_us << '\n';
     }
 }
 
@@ -226,7 +252,14 @@ void profiler::record_request(const profile_request_row & row) {
             << row.predictor_end_us << ','
             << row.predictor_save_us << ','
             << row.profile_flush_us << ','
-            << row.sidecar_write_bytes << '\n';
+            << row.sidecar_write_bytes << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << '\n';
     }
 }
 
@@ -273,6 +306,13 @@ std::string profiler::summary() const {
     out << "eamc_score_materialize_us: " << stats.eamc_score_materialize_us << '\n';
     out << "eamc_score_cache_hits: " << stats.eamc_score_cache_hits << '\n';
     out << "eamc_score_cache_misses: " << stats.eamc_score_cache_misses << '\n';
+    out << "routes_required: " << stats.routes_required << '\n';
+    out << "routes_hit: " << stats.routes_hit << '\n';
+    out << "routes_persistent: " << stats.routes_persistent << '\n';
+    out << "k_empty_admit: " << stats.k_empty_admit << '\n';
+    out << "k_victim_admit: " << stats.k_victim_admit << '\n';
+    out << "k_scratch: " << stats.k_scratch << '\n';
+    out << "route_rank_us: " << stats.route_rank_us << '\n';
     out << "request_wall_us: " << stats.request_wall_us << '\n';
     out << "request_end_us: " << stats.request_end_us << '\n';
     out << "predictor_end_us: " << stats.predictor_end_us << '\n';
@@ -349,6 +389,14 @@ std::string format_summary(
     out << std::fixed << std::setprecision(1);
     out << "cache hit rate (prefill): " << hit_rate_percent(profile.prefill) << "%\n";
     out << "cache hit rate (decode): " << hit_rate_percent(profile.decode) << "%\n";
+    out << "route hit coverage (prefill): "
+        << route_coverage_percent(profile.prefill.routes_hit, profile.prefill.routes_required) << "%\n";
+    out << "route persistent coverage (prefill): "
+        << route_coverage_percent(profile.prefill.routes_persistent, profile.prefill.routes_required) << "%\n";
+    out << "route hit coverage (decode): "
+        << route_coverage_percent(profile.decode.routes_hit, profile.decode.routes_required) << "%\n";
+    out << "route persistent coverage (decode): "
+        << route_coverage_percent(profile.decode.routes_persistent, profile.decode.routes_required) << "%\n";
     out << "SSD bytes read (decode): " << std::setprecision(2) << bytes_to_gib(profile.decode.ssd_bytes)
         << " GB  (avg " << bytes_to_mib(decode_bytes_per_token) << " MB/token)\n";
     out << "TTFT: " << std::setprecision(1) << ctx.ttft_ms << " ms\n";
@@ -421,6 +469,13 @@ profile_phase_stats profiler::total() const {
     stats.eamc_score_materialize_us = prefill_stats.eamc_score_materialize_us + decode_stats.eamc_score_materialize_us;
     stats.eamc_score_cache_hits = prefill_stats.eamc_score_cache_hits + decode_stats.eamc_score_cache_hits;
     stats.eamc_score_cache_misses = prefill_stats.eamc_score_cache_misses + decode_stats.eamc_score_cache_misses;
+    stats.routes_required = prefill_stats.routes_required + decode_stats.routes_required;
+    stats.routes_hit = prefill_stats.routes_hit + decode_stats.routes_hit;
+    stats.routes_persistent = prefill_stats.routes_persistent + decode_stats.routes_persistent;
+    stats.k_empty_admit = prefill_stats.k_empty_admit + decode_stats.k_empty_admit;
+    stats.k_victim_admit = prefill_stats.k_victim_admit + decode_stats.k_victim_admit;
+    stats.k_scratch = prefill_stats.k_scratch + decode_stats.k_scratch;
+    stats.route_rank_us = prefill_stats.route_rank_us + decode_stats.route_rank_us;
     stats.request_wall_us = prefill_stats.request_wall_us + decode_stats.request_wall_us;
     stats.request_end_us = prefill_stats.request_end_us + decode_stats.request_end_us;
     stats.predictor_end_us = prefill_stats.predictor_end_us + decode_stats.predictor_end_us;
@@ -435,7 +490,7 @@ profile_phase_stats profiler::total() const {
 }
 
 void profiler::write_header() {
-    csv << "row_type,request_idx,repeat_idx,batch_idx,token_idx,phase,layer,k_required,k_hit,k_miss,ssd_read_us,h2d_us,compute_us,stall_us,pred_us,pred_observe_us,pred_score_us,callback_wall_us,topk_d2h_us,slot_ids_h2d_us,slot_table_h2d_us,eamc_rows_scored,eamc_cosine_us,eamc_score_materialize_us,eamc_score_cache_hits,eamc_score_cache_misses,cache_resident_experts,predictor,request_wall_us,request_end_us,predictor_end_us,predictor_save_us,profile_flush_us,sidecar_write_bytes\n";
+    csv << "row_type,request_idx,repeat_idx,batch_idx,token_idx,phase,layer,k_required,k_hit,k_miss,ssd_read_us,h2d_us,compute_us,stall_us,pred_us,pred_observe_us,pred_score_us,callback_wall_us,topk_d2h_us,slot_ids_h2d_us,slot_table_h2d_us,eamc_rows_scored,eamc_cosine_us,eamc_score_materialize_us,eamc_score_cache_hits,eamc_score_cache_misses,cache_resident_experts,predictor,request_wall_us,request_end_us,predictor_end_us,predictor_save_us,profile_flush_us,sidecar_write_bytes,routes_required,routes_hit,routes_persistent,k_empty_admit,k_victim_admit,k_scratch,route_rank_us\n";
 }
 
 } // namespace llama_moe
