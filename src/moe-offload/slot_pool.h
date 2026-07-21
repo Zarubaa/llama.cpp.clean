@@ -34,6 +34,10 @@ LLAMA_API void slot_pool_reset_cache();
 // caller preference; the loader fills at most n_slots_per_layer() per layer.
 LLAMA_API bool slot_pool_hot_start(const std::vector<std::vector<int>> & experts_by_layer);
 
+// Keep speculative-only expert misses in transient scratch slots so rejected
+// candidate rows cannot evict the persistent decode working set.
+LLAMA_API void slot_pool_set_speculative_aware(bool enabled);
+
 // Returns the uniform persistent cache slot count per MoE layer.
 LLAMA_API uint32_t n_slots_per_layer();
 

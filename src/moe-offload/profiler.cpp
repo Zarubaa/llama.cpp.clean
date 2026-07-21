@@ -159,6 +159,12 @@ void profiler::record(const profile_row & row) {
     stats.k_victim_admit += row.k_victim_admit;
     stats.k_scratch += row.k_scratch;
     stats.route_rank_us += row.route_rank_us;
+    stats.spec_routes_required += row.spec_routes_required;
+    stats.spec_unique_experts += row.spec_unique_experts;
+    stats.spec_only_experts += row.spec_only_experts;
+    stats.spec_only_hits += row.spec_only_hits;
+    stats.spec_only_misses += row.spec_only_misses;
+    stats.spec_only_ssd_bytes += row.spec_only_ssd_bytes;
     if (row.cache_resident_experts > stats.cache_resident_peak) {
         stats.cache_resident_peak = row.cache_resident_experts;
     }
@@ -204,7 +210,13 @@ void profiler::record(const profile_row & row) {
             << row.k_empty_admit << ','
             << row.k_victim_admit << ','
             << row.k_scratch << ','
-            << row.route_rank_us << '\n';
+            << row.route_rank_us << ','
+            << row.spec_routes_required << ','
+            << row.spec_unique_experts << ','
+            << row.spec_only_experts << ','
+            << row.spec_only_hits << ','
+            << row.spec_only_misses << ','
+            << row.spec_only_ssd_bytes << '\n';
     }
 }
 
@@ -253,6 +265,12 @@ void profiler::record_request(const profile_request_row & row) {
             << row.predictor_save_us << ','
             << row.profile_flush_us << ','
             << row.sidecar_write_bytes << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
             << 0 << ','
             << 0 << ','
             << 0 << ','
@@ -313,6 +331,12 @@ std::string profiler::summary() const {
     out << "k_victim_admit: " << stats.k_victim_admit << '\n';
     out << "k_scratch: " << stats.k_scratch << '\n';
     out << "route_rank_us: " << stats.route_rank_us << '\n';
+    out << "spec_routes_required: " << stats.spec_routes_required << '\n';
+    out << "spec_unique_experts: " << stats.spec_unique_experts << '\n';
+    out << "spec_only_experts: " << stats.spec_only_experts << '\n';
+    out << "spec_only_hits: " << stats.spec_only_hits << '\n';
+    out << "spec_only_misses: " << stats.spec_only_misses << '\n';
+    out << "spec_only_ssd_bytes: " << stats.spec_only_ssd_bytes << '\n';
     out << "request_wall_us: " << stats.request_wall_us << '\n';
     out << "request_end_us: " << stats.request_end_us << '\n';
     out << "predictor_end_us: " << stats.predictor_end_us << '\n';
@@ -409,6 +433,59 @@ std::string format_summary(
     out << "TPOT: " << std::setprecision(2) << ctx.tpot_ms << " ms\n";
     out << "total: " << std::setprecision(1) << ctx.total_ms << " ms\n\n";
 
+    out << "generation token hash: 0x" << std::hex << ctx.generation_token_hash << std::dec
+        << "  repeats_consistent=" << (ctx.generation_tokens_consistent ? "true" : "false") << "\n";
+
+    if (ctx.speculative_type != "none") {
+        const uint64_t output_tokens = (uint64_t) std::max(1, ctx.n_gen) * (uint64_t) std::max(1, ctx.n_repeat);
+        const double acceptance = ctx.draft_tokens_generated == 0 ? 0.0
+            : (double) ctx.draft_tokens_accepted / (double) ctx.draft_tokens_generated;
+        const double output_per_step = ctx.verification_steps == 0 ? 0.0
+            : (double) output_tokens / (double) ctx.verification_steps;
+
+        out << "speculative decoding:\n";
+        out << "  type                 " << ctx.speculative_type << '\n';
+        out << "  draft generated      " << ctx.draft_tokens_generated << '\n';
+        out << "  draft accepted       " << ctx.draft_tokens_accepted << '\n';
+        out << "  acceptance           " << std::setprecision(2) << 100.0 * acceptance << "%\n";
+        out << "  verification steps   " << ctx.verification_steps << '\n';
+        out << "  output/verify step   " << output_per_step << '\n';
+        out << "  target tokens eval   " << ctx.target_tokens_evaluated << '\n';
+        out << "  draft time           " << ctx.draft_time_ms << " ms"
+            << "  (" << ctx.draft_time_ms / (double) output_tokens << " ms/output token)\n";
+        out << "  target verify time   " << ctx.target_verify_time_ms << " ms"
+            << "  (" << ctx.target_verify_time_ms / (double) output_tokens << " ms/output token)\n\n";
+
+        const uint64_t spec_only_required = profile.decode.spec_only_hits + profile.decode.spec_only_misses;
+        const double spec_only_hit_rate = spec_only_required == 0 ? 0.0
+            : 100.0 * (double) profile.decode.spec_only_hits / (double) spec_only_required;
+        out << "speculative MoE I/O:\n";
+        out << "  candidate routes     " << profile.decode.spec_routes_required << '\n';
+        out << "  candidate unique     " << profile.decode.spec_unique_experts << '\n';
+        out << "  candidate-only       " << profile.decode.spec_only_experts << '\n';
+        out << "  candidate-only hit   " << std::setprecision(2) << spec_only_hit_rate << "%\n";
+        out << "  candidate-only miss  " << profile.decode.spec_only_misses << '\n';
+        out << "  candidate-only SSD   " << bytes_to_gib(profile.decode.spec_only_ssd_bytes) << " GB"
+            << "  (" << bytes_to_mib((double) profile.decode.spec_only_ssd_bytes / (double) output_tokens)
+            << " MB/output token)\n\n";
+
+        if (ctx.speculative_stage3) {
+            const double spec_cal_ms = ctx.stage3_spec_calibration_outputs == 0 ? 0.0
+                : ctx.stage3_spec_calibration_ms / (double) ctx.stage3_spec_calibration_outputs;
+            const double base_cal_ms = ctx.stage3_base_calibration_outputs == 0 ? 0.0
+                : ctx.stage3_base_calibration_ms / (double) ctx.stage3_base_calibration_outputs;
+            out << "Stage 3 gate:\n";
+            out << "  enabled repeats      " << ctx.stage3_gate_enabled_repeats << '\n';
+            out << "  disabled repeats     " << ctx.stage3_gate_disabled_repeats << '\n';
+            out << "  spec calibration    " << spec_cal_ms << " ms/output token"
+                << "  (n=" << ctx.stage3_spec_calibration_outputs << ")\n";
+            out << "  base calibration    " << base_cal_ms << " ms/output token"
+                << "  (n=" << ctx.stage3_base_calibration_outputs << ")\n\n";
+        }
+    } else {
+        out << '\n';
+    }
+
     append_io_breakdown(out, "prefill", profile.prefill, ctx.n_prompt, ctx.n_repeat);
     append_profiler_breakdown(out, "prefill", profile.prefill, ctx.n_prompt, ctx.n_repeat);
     append_io_breakdown(out, "decode", profile.decode, ctx.n_gen, ctx.n_repeat);
@@ -476,6 +553,12 @@ profile_phase_stats profiler::total() const {
     stats.k_victim_admit = prefill_stats.k_victim_admit + decode_stats.k_victim_admit;
     stats.k_scratch = prefill_stats.k_scratch + decode_stats.k_scratch;
     stats.route_rank_us = prefill_stats.route_rank_us + decode_stats.route_rank_us;
+    stats.spec_routes_required = prefill_stats.spec_routes_required + decode_stats.spec_routes_required;
+    stats.spec_unique_experts = prefill_stats.spec_unique_experts + decode_stats.spec_unique_experts;
+    stats.spec_only_experts = prefill_stats.spec_only_experts + decode_stats.spec_only_experts;
+    stats.spec_only_hits = prefill_stats.spec_only_hits + decode_stats.spec_only_hits;
+    stats.spec_only_misses = prefill_stats.spec_only_misses + decode_stats.spec_only_misses;
+    stats.spec_only_ssd_bytes = prefill_stats.spec_only_ssd_bytes + decode_stats.spec_only_ssd_bytes;
     stats.request_wall_us = prefill_stats.request_wall_us + decode_stats.request_wall_us;
     stats.request_end_us = prefill_stats.request_end_us + decode_stats.request_end_us;
     stats.predictor_end_us = prefill_stats.predictor_end_us + decode_stats.predictor_end_us;
@@ -490,7 +573,7 @@ profile_phase_stats profiler::total() const {
 }
 
 void profiler::write_header() {
-    csv << "row_type,request_idx,repeat_idx,batch_idx,token_idx,phase,layer,k_required,k_hit,k_miss,ssd_read_us,h2d_us,compute_us,stall_us,pred_us,pred_observe_us,pred_score_us,callback_wall_us,topk_d2h_us,slot_ids_h2d_us,slot_table_h2d_us,eamc_rows_scored,eamc_cosine_us,eamc_score_materialize_us,eamc_score_cache_hits,eamc_score_cache_misses,cache_resident_experts,predictor,request_wall_us,request_end_us,predictor_end_us,predictor_save_us,profile_flush_us,sidecar_write_bytes,routes_required,routes_hit,routes_persistent,k_empty_admit,k_victim_admit,k_scratch,route_rank_us\n";
+    csv << "row_type,request_idx,repeat_idx,batch_idx,token_idx,phase,layer,k_required,k_hit,k_miss,ssd_read_us,h2d_us,compute_us,stall_us,pred_us,pred_observe_us,pred_score_us,callback_wall_us,topk_d2h_us,slot_ids_h2d_us,slot_table_h2d_us,eamc_rows_scored,eamc_cosine_us,eamc_score_materialize_us,eamc_score_cache_hits,eamc_score_cache_misses,cache_resident_experts,predictor,request_wall_us,request_end_us,predictor_end_us,predictor_save_us,profile_flush_us,sidecar_write_bytes,routes_required,routes_hit,routes_persistent,k_empty_admit,k_victim_admit,k_scratch,route_rank_us,spec_routes_required,spec_unique_experts,spec_only_experts,spec_only_hits,spec_only_misses,spec_only_ssd_bytes\n";
 }
 
 } // namespace llama_moe

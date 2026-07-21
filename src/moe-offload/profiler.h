@@ -45,6 +45,12 @@ struct profile_row {
     uint64_t k_victim_admit = 0;
     uint64_t k_scratch = 0;
     int64_t route_rank_us = 0;
+    uint64_t spec_routes_required = 0;
+    uint64_t spec_unique_experts = 0;
+    uint64_t spec_only_experts = 0;
+    uint64_t spec_only_hits = 0;
+    uint64_t spec_only_misses = 0;
+    uint64_t spec_only_ssd_bytes = 0;
 };
 
 struct profile_request_row {
@@ -98,6 +104,12 @@ struct profile_phase_stats {
     uint64_t k_victim_admit = 0;
     uint64_t k_scratch = 0;
     int64_t route_rank_us = 0;
+    uint64_t spec_routes_required = 0;
+    uint64_t spec_unique_experts = 0;
+    uint64_t spec_only_experts = 0;
+    uint64_t spec_only_hits = 0;
+    uint64_t spec_only_misses = 0;
+    uint64_t spec_only_ssd_bytes = 0;
 };
 
 struct profile_snapshot {
@@ -129,6 +141,22 @@ struct profile_summary_context {
     double total_ms = 0.0;
     int cold_prefill_count = 0;
     int warm_prefill_count = 0;
+    std::string speculative_type = "none";
+    uint64_t draft_tokens_generated = 0;
+    uint64_t draft_tokens_accepted = 0;
+    uint64_t verification_steps = 0;
+    uint64_t target_tokens_evaluated = 0;
+    double draft_time_ms = 0.0;
+    double target_verify_time_ms = 0.0;
+    uint64_t generation_token_hash = 0;
+    bool generation_tokens_consistent = true;
+    bool speculative_stage3 = false;
+    uint64_t stage3_gate_enabled_repeats = 0;
+    uint64_t stage3_gate_disabled_repeats = 0;
+    uint64_t stage3_spec_calibration_outputs = 0;
+    uint64_t stage3_base_calibration_outputs = 0;
+    double stage3_spec_calibration_ms = 0.0;
+    double stage3_base_calibration_ms = 0.0;
     // Baseline-adjusted VRAM peak for this benchmark process. This is computed
     // from whole-device memory samples, so it removes pre-existing allocations
     // on the visible GPU(s) but can still include concurrent allocations that

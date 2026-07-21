@@ -1,7 +1,7 @@
 set(TARGET llama-moe-bench)
 
 add_executable(${TARGET} main.cpp)
-target_link_libraries(${TARGET} PRIVATE llama)
+target_link_libraries(${TARGET} PRIVATE llama llama-common)
 target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
 

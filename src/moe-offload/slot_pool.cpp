@@ -109,6 +109,7 @@ struct slot_pool_state {
     uint64_t cache_hits = 0;
     uint64_t cache_misses = 0;
     uint64_t topk_calls = 0;
+    bool speculative_aware = false;
 
     // Phase E: predictor
     std::unique_ptr<predictor> pred;
@@ -346,6 +347,7 @@ void configure_slot_pool() {
     s.topk_calls = 0;
     s.token_idx = 0;
     s.current_token_idx = 0;
+    s.speculative_aware = false;
 
     s.pending_rows.clear();
     s.last_pending_idx = -1;
@@ -394,6 +396,13 @@ void reset_slot_pool() {
     if (s.io_fp) { fclose(s.io_fp); s.io_fp = nullptr; }
     s.pred.reset();
     s.pred_dirty = false;
+    s.speculative_aware = false;
+}
+
+void slot_pool_set_speculative_aware(bool enabled) {
+    auto & s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    s.speculative_aware = enabled;
 }
 
 void slot_pool_reset_cache() {
@@ -1280,7 +1289,10 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
     const auto topk_d2h_end = std::chrono::steady_clock::now();
     const int64_t topk_d2h_us = elapsed_us(topk_d2h_start, topk_d2h_end);
 
-    const char * phase = n_tokens > 1 ? "prefill" : "decode";
+    const profile_request_row request_row = current_profile_request_row();
+    const std::string phase = request_row.phase == "unknown"
+        ? (n_tokens > 1 ? "prefill" : "decode")
+        : request_row.phase;
     if (logical == 0) {
         s.current_token_idx = s.token_idx;
     }
@@ -1310,13 +1322,53 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
     const int64_t route_rank_us = elapsed_us(route_rank_start, route_rank_end);
     const uint64_t routes_required = (uint64_t) observed_routes.size();
 
+    const bool speculative_batch = phase == "decode" && n_tokens > 1;
+    const size_t routes_per_token = (size_t) topk_tensor->ne[0];
+    std::unordered_set<int32_t> committed_experts;
+    std::unordered_set<int32_t> speculative_experts;
+    std::unordered_set<int32_t> speculative_only_experts;
+    uint64_t spec_routes_required = 0;
+    if (speculative_batch) {
+        committed_experts.reserve(routes_per_token);
+        speculative_experts.reserve(ids.size() - std::min(ids.size(), routes_per_token));
+        for (size_t i = 0; i < ids.size(); ++i) {
+            const int32_t e = ids[i];
+            if (e < 0 || (uint32_t) e >= mf.n_experts_per_layer) {
+                continue;
+            }
+            if (i < routes_per_token) {
+                committed_experts.insert(e);
+            } else {
+                speculative_experts.insert(e);
+                ++spec_routes_required;
+            }
+        }
+        for (int32_t e : speculative_experts) {
+            if (!committed_experts.count(e)) {
+                speculative_only_experts.insert(e);
+            }
+        }
+    }
+
     int64_t pred_observe_us = 0;
     int64_t pred_score_us = 0;
 
     // Phase E-3: observe expert usage for predictor.
     {
         const auto pred_start = std::chrono::steady_clock::now();
-        s.pred->observe(logical, observed_routes);
+        if (s.speculative_aware && speculative_batch) {
+            std::vector<int> committed_routes;
+            committed_routes.reserve(routes_per_token);
+            for (size_t i = 0; i < std::min(ids.size(), routes_per_token); ++i) {
+                const int32_t e = ids[i];
+                if (e >= 0 && (uint32_t) e < mf.n_experts_per_layer) {
+                    committed_routes.push_back((int) e);
+                }
+            }
+            s.pred->observe(logical, committed_routes);
+        } else {
+            s.pred->observe(logical, observed_routes);
+        }
         const auto pred_end = std::chrono::steady_clock::now();
         pred_observe_us += elapsed_us(pred_start, pred_end);
     }
@@ -1400,6 +1452,8 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
     }
 
     uint64_t routes_hit = 0;
+    uint64_t spec_only_hits = 0;
+    uint64_t spec_only_misses = 0;
     for (const routed_expert & route : ranked) {
         const int32_t e = route.id;
         auto it = lc.exp2slot.find(e);
@@ -1408,6 +1462,13 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
             ++s.cache_hits;
             ++dbg_hits;
             routes_hit += route.count;
+        }
+        if (speculative_only_experts.count(e)) {
+            if (it != lc.exp2slot.end()) {
+                ++spec_only_hits;
+            } else {
+                ++spec_only_misses;
+            }
         }
     }
 
@@ -1447,6 +1508,7 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
     int submitted_misses = 0;
     int completed_misses = 0;
     int64_t stall_us = 0;
+    uint64_t spec_only_ssd_bytes = 0;
 
     // Phase I: per-miss h2d timing events stashed for elapsed-time query at
     // end_request. Owned by the pending_profile_row we create below.
@@ -1483,16 +1545,20 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
         // Once full, replace a non-current persistent expert using the selected
         // predictor (LRU or EAMC). Shared scratch is only a correctness fallback
         // when every persistent resident is needed by this same callback.
+        const bool allow_persistent = !s.speculative_aware ||
+            !speculative_only_experts.count(e);
         int32_t slot = -1;
         bool persistent_slot = false;
-        for (uint32_t si = 0; si < s.n_slots; ++si) {
-            if (lc.slot_to_expert[si] < 0) { slot = (int32_t) si; break; }
+        if (allow_persistent) {
+            for (uint32_t si = 0; si < s.n_slots; ++si) {
+                if (lc.slot_to_expert[si] < 0) { slot = (int32_t) si; break; }
+            }
         }
         if (slot >= 0) {
             persistent_slot = true;
             ++dbg_free_alloc;
         }
-        if (slot < 0) {
+        if (allow_persistent && slot < 0) {
             // Phase E: use predictor.score for eviction (lower = evict).
             // Phase L.2: skip experts reserved earlier in this same
             // callback — their slots hold in-flight H2D data.
@@ -1581,6 +1647,9 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
                 mf.data_offset + rec.rel_offset,
                 (char *) slot_tensor->data + write_off,
             });
+            if (speculative_only_experts.count(e)) {
+                spec_only_ssd_bytes += rec.size;
+            }
         }
 
         // Reserve persistent slots immediately so a later miss in the same
@@ -1600,7 +1669,9 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
     // lru_touch() pushes to the front. Touch low-ranked experts first so the
     // highest-frequency routed expert ends this callback at the MRU end.
     for (auto it = ranked.rbegin(); it != ranked.rend(); ++it) {
-        if (lc.exp2slot.count(it->id)) {
+        const bool touch = !s.speculative_aware || !speculative_batch ||
+            committed_experts.count(it->id);
+        if (touch && lc.exp2slot.count(it->id)) {
             lru_touch(lc, it->id);
         }
     }
@@ -1909,7 +1980,6 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
         int k_req = (int) uniq.size();
         slot_pool_state::pending_profile_row p;
         p.logical = logical;
-        const profile_request_row request_row = current_profile_request_row();
         p.row.request_idx = request_row.request_idx;
         p.row.repeat_idx = request_row.repeat_idx;
         p.row.batch_idx = request_row.batch_idx;
@@ -1950,6 +2020,12 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
         p.row.k_victim_admit = (uint64_t) dbg_evictions;
         p.row.k_scratch = (uint64_t) dbg_scratch_alloc;
         p.row.route_rank_us = route_rank_us;
+        p.row.spec_routes_required = spec_routes_required;
+        p.row.spec_unique_experts = speculative_experts.size();
+        p.row.spec_only_experts = speculative_only_experts.size();
+        p.row.spec_only_hits = spec_only_hits;
+        p.row.spec_only_misses = spec_only_misses;
+        p.row.spec_only_ssd_bytes = spec_only_ssd_bytes;
         p.h2d_events = std::move(h2d_events_for_row);
 
         // Phase I: record compute_begin on the compute stream right after

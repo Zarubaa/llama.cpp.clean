@@ -5,6 +5,9 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 
+#include "common.h"
+#include "speculative.h"
+
 #include "moe-offload/runtime.h"
 #include "moe-offload/slot_pool.h"
 
@@ -45,9 +48,19 @@ struct bench_params {
     std::string moe_eamc_path;
     std::string moe_profile_csv;
     std::string moe_profile_summary;
+    std::string output_tokens;
     int n_gpu_layers = 99;
     int n_ctx = 4096;
     int n_ubatch = 0;
+    std::string spec_type = "none";
+    int spec_draft_n_max = 16;
+    int spec_draft_n_min = 4;
+    int spec_ngram_size_n = 12;
+    int spec_ngram_min_hits = 1;
+    int spec_n_rs_seq = -1;
+    int spec_stage3_calibration_tokens = 16;
+    bool moe_offload = true;
+    bool spec_stage3 = false;
     bool moe_reset_cache_between_repeats = false;
     bool moe_warm_cache = false;
     bool moe_hot_start = false;
@@ -86,11 +99,21 @@ static bool parse_args(int argc, char ** argv, bench_params & p) {
         else if (value_for("--moe-eamc-path", p.moe_eamc_path)) {}
         else if (value_for("--moe-profile-csv", p.moe_profile_csv)) {}
         else if (value_for("--moe-profile-summary", p.moe_profile_summary)) {}
+        else if (value_for("--output-tokens", p.output_tokens)) {}
         else if (int_for("-ngl", p.n_gpu_layers)) {}
         else if (int_for("-c", p.n_ctx)) {}
         else if (int_for("-ub", p.n_ubatch)) {}
         else if (int_for("--ubatch", p.n_ubatch)) {}
         else if (int_for("--ubatch-size", p.n_ubatch)) {}
+        else if (value_for("--spec-type", p.spec_type)) {}
+        else if (int_for("--spec-draft-n-max", p.spec_draft_n_max)) {}
+        else if (int_for("--spec-draft-n-min", p.spec_draft_n_min)) {}
+        else if (int_for("--spec-ngram-size-n", p.spec_ngram_size_n)) {}
+        else if (int_for("--spec-ngram-min-hits", p.spec_ngram_min_hits)) {}
+        else if (int_for("--spec-n-rs-seq", p.spec_n_rs_seq)) {}
+        else if (int_for("--spec-stage3-calibration-tokens", p.spec_stage3_calibration_tokens)) {}
+        else if (arg == "--spec-stage3") { p.spec_stage3 = true; }
+        else if (arg == "--no-moe-offload") { p.moe_offload = false; }
         else if (arg == "--moe-reset-cache-between-repeats") { p.moe_reset_cache_between_repeats = true; }
         else if (arg == "--moe-warm-cache") { p.moe_warm_cache = true; }
         else if (arg == "--moe-hot-start") { p.moe_hot_start = true; }
@@ -99,7 +122,64 @@ static bool parse_args(int argc, char ** argv, bench_params & p) {
     if (p.n_repeat < 1) p.n_repeat = 1;
     if (p.n_prompt < 1) p.n_prompt = 1;
     if (p.n_gen < 1) p.n_gen = 1;
+    if (p.spec_draft_n_max < 1) p.spec_draft_n_max = 1;
+    if (p.spec_draft_n_min < 0) p.spec_draft_n_min = 0;
+    if (p.spec_draft_n_min > p.spec_draft_n_max) p.spec_draft_n_min = p.spec_draft_n_max;
+    if (p.spec_ngram_size_n < 1) p.spec_ngram_size_n = 1;
+    if (p.spec_ngram_min_hits < 1) p.spec_ngram_min_hits = 1;
+    if (p.spec_n_rs_seq < -1) p.spec_n_rs_seq = -1;
+    if (p.spec_stage3_calibration_tokens < 1) p.spec_stage3_calibration_tokens = 1;
     return !p.model.empty();
+}
+
+static bool make_speculative_params(
+        const bench_params & p,
+        common_params_speculative & params,
+        std::string & error) {
+    const common_speculative_type type = common_speculative_type_from_name(p.spec_type);
+
+    switch (type) {
+        case COMMON_SPECULATIVE_TYPE_NONE:
+        case COMMON_SPECULATIVE_TYPE_NGRAM_SIMPLE:
+        case COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K:
+        case COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V:
+        case COMMON_SPECULATIVE_TYPE_NGRAM_MOD:
+            break;
+        case COMMON_SPECULATIVE_TYPE_COUNT:
+            error = "unknown speculative type: " + p.spec_type;
+            return false;
+        default:
+            error = "llama-moe-bench Stage 1/2 supports n-gram speculative types only";
+            return false;
+    }
+
+    params.types = { type };
+    params.draft.n_max = p.spec_draft_n_max;
+    params.draft.n_min = p.spec_draft_n_min;
+
+    params.ngram_mod.n_match = p.spec_ngram_size_n;
+    params.ngram_mod.n_max = p.spec_draft_n_max;
+    params.ngram_mod.n_min = p.spec_draft_n_min;
+
+    params.ngram_simple.size_n = (uint16_t) p.spec_ngram_size_n;
+    params.ngram_simple.size_m = (uint16_t) p.spec_draft_n_max;
+    params.ngram_simple.min_hits = (uint16_t) p.spec_ngram_min_hits;
+    params.ngram_map_k = params.ngram_simple;
+    params.ngram_map_k4v = params.ngram_simple;
+
+    return true;
+}
+
+static uint64_t hash_tokens(const llama_tokens & tokens) {
+    uint64_t hash = 1469598103934665603ull;
+    for (llama_token token : tokens) {
+        const uint32_t value = (uint32_t) token;
+        for (int shift = 0; shift < 32; shift += 8) {
+            hash ^= (value >> shift) & 0xffu;
+            hash *= 1099511628211ull;
+        }
+    }
+    return hash;
 }
 
 static double now_ms() {
@@ -342,8 +422,8 @@ static std::string build_summary(
     return out.str();
 }
 
-static llama_token greedy_token(llama_context * ctx, int vocab_size) {
-    float * logits = llama_get_logits_ith(ctx, 0);
+static llama_token greedy_token(llama_context * ctx, int idx, int vocab_size) {
+    float * logits = llama_get_logits_ith(ctx, idx);
     if (!logits) {
         return 0;
     }
@@ -358,12 +438,49 @@ static llama_token greedy_token(llama_context * ctx, int vocab_size) {
     return token;
 }
 
+static llama_tokens greedy_sample_and_accept_n(
+        llama_context * ctx,
+        const llama_tokens & draft,
+        int vocab_size) {
+    llama_tokens result;
+    result.reserve(draft.size() + 1);
+
+    size_t i = 0;
+    for (; i < draft.size(); ++i) {
+        const llama_token id = greedy_token(ctx, (int) i, vocab_size);
+        result.push_back(id);
+        if (draft[i] != id) {
+            break;
+        }
+    }
+    if (i == draft.size()) {
+        result.push_back(greedy_token(ctx, (int) i, vocab_size));
+    }
+
+    return result;
+}
+
 int main(int argc, char ** argv) {
     bench_params p;
     if (!parse_args(argc, argv, p)) {
-        fprintf(stderr, "Usage: llama-moe-bench --model <path> --pp N --tg N [--repeat N] [--moe-cache-vram-mb MB] [--moe-predictor lru|eamc] [--moe-eamc-path PATH] [--moe-profile-csv PATH] [--moe-profile-summary PATH] [--moe-reset-cache-between-repeats] [--moe-warm-cache] [--moe-hot-start] [-ub N]\n");
+        fprintf(stderr, "Usage: llama-moe-bench --model <path> --pp N --tg N [--repeat N] [--moe-cache-vram-mb MB] [--moe-predictor lru|eamc] [--moe-eamc-path PATH] [--moe-profile-csv PATH] [--moe-profile-summary PATH] [--output-tokens PATH] [--no-moe-offload] [--moe-reset-cache-between-repeats] [--moe-warm-cache] [--moe-hot-start] [-ub N] [--spec-type none|ngram-simple|ngram-map-k|ngram-map-k4v|ngram-mod] [--spec-draft-n-max N] [--spec-draft-n-min N] [--spec-ngram-size-n N] [--spec-ngram-min-hits N] [--spec-n-rs-seq N] [--spec-stage3] [--spec-stage3-calibration-tokens N]\n");
         return 1;
     }
+
+    common_params_speculative speculative_params;
+    std::string speculative_error;
+    if (!make_speculative_params(p, speculative_params, speculative_error)) {
+        fprintf(stderr, "invalid speculative configuration: %s\n", speculative_error.c_str());
+        return 1;
+    }
+    const bool speculative_enabled = speculative_params.types[0] != COMMON_SPECULATIVE_TYPE_NONE;
+    if (p.spec_stage3 && !speculative_enabled) {
+        fprintf(stderr, "--spec-stage3 requires a speculative n-gram type\n");
+        return 1;
+    }
+    const int speculative_n_max = speculative_enabled
+        ? common_speculative_n_max(&speculative_params)
+        : 0;
 
     std::string prompt_text = p.prompt;
     if (prompt_text.empty()) {
@@ -394,7 +511,7 @@ int main(int argc, char ** argv) {
     llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = p.n_gpu_layers;
     model_params.use_mmap = false;
-    model_params.moe_offload = true;
+    model_params.moe_offload = p.moe_offload;
     model_params.moe_cache_vram_mb = (uint64_t) p.moe_cache_mb;
     model_params.moe_predictor = p.moe_predictor.c_str();
     model_params.moe_eamc_path = p.moe_eamc_path.empty() ? nullptr : p.moe_eamc_path.c_str();
@@ -407,6 +524,12 @@ int main(int argc, char ** argv) {
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx = p.n_ctx;
     ctx_params.n_batch = std::max(2048, p.n_prompt);
+    if (speculative_enabled) {
+        ctx_params.n_outputs_max = (uint32_t) std::max(1, 1 + speculative_n_max);
+        ctx_params.n_rs_seq = p.spec_n_rs_seq >= 0
+            ? (uint32_t) p.spec_n_rs_seq
+            : (uint32_t) speculative_n_max;
+    }
     if (p.n_ubatch > 0) {
         ctx_params.n_ubatch = (uint32_t) p.n_ubatch;
     }
@@ -429,6 +552,26 @@ int main(int argc, char ** argv) {
     }
     update_vram_peak();
     dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
+
+    common_context_seq_rm_type seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_PART;
+    if (speculative_enabled) {
+        seq_rm_type = common_context_can_seq_rm(ctx);
+        if (seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
+            fprintf(stderr, "speculative decoding requires context sequence rollback support\n");
+            llama_free(ctx);
+            llama_model_free(model);
+            llama_backend_free();
+            return 1;
+        }
+
+        // The capability probe evaluates two tokens and must not affect the
+        // measured cache or profiler state.
+        if (p.moe_offload) {
+            llama_moe::slot_pool_reset_cache();
+            llama_moe::reset_profile();
+        }
+    }
+    llama_moe::slot_pool_set_speculative_aware(p.spec_stage3 && p.moe_offload);
 
     char model_desc_buf[512] = {};
     std::string model_desc;
@@ -453,7 +596,7 @@ int main(int argc, char ** argv) {
         n_prompt_tokens = p.n_prompt;
     }
 
-    if (p.moe_hot_start) {
+    if (p.moe_hot_start && p.moe_offload) {
         const uint32_t n_slots = llama_moe::n_slots_per_layer();
         const uint32_t n_experts = llama_moe::n_experts_per_layer();
         const std::string hot_start_path = p.moe_eamc_path.empty() ? default_eamc_path_of(p.model) : p.moe_eamc_path;
@@ -478,6 +621,20 @@ int main(int argc, char ** argv) {
     std::vector<double> warm_ttft_ms;
     std::vector<double> tpot_ms;
     std::vector<double> total_ms;
+    uint64_t draft_tokens_generated = 0;
+    uint64_t draft_tokens_accepted = 0;
+    uint64_t verification_steps = 0;
+    uint64_t target_tokens_evaluated = 0;
+    double draft_time_ms = 0.0;
+    double target_verify_time_ms = 0.0;
+    uint64_t generation_token_hash = 0;
+    bool generation_tokens_consistent = true;
+    uint64_t stage3_gate_enabled_repeats = 0;
+    uint64_t stage3_gate_disabled_repeats = 0;
+    uint64_t stage3_spec_calibration_outputs = 0;
+    uint64_t stage3_base_calibration_outputs = 0;
+    double stage3_spec_calibration_ms = 0.0;
+    double stage3_base_calibration_ms = 0.0;
     ttft_ms.reserve((size_t) p.n_repeat);
     cold_ttft_ms.reserve((size_t) p.n_repeat);
     warm_ttft_ms.reserve((size_t) p.n_repeat);
@@ -500,9 +657,9 @@ int main(int argc, char ** argv) {
     auto write_summary = [&](bool print_stdout) -> llama_moe::profile_snapshot {
         llama_moe::profile_summary_context summary_ctx;
         summary_ctx.model = model_desc.empty() ? basename_of(p.model) : model_desc;
-        summary_ctx.predictor = p.moe_predictor;
+        summary_ctx.predictor = p.moe_offload ? p.moe_predictor : "none";
         summary_ctx.storage = storage_label_of(p.model);
-        summary_ctx.cache_mb = (uint64_t) p.moe_cache_mb;
+        summary_ctx.cache_mb = p.moe_offload ? (uint64_t) p.moe_cache_mb : 0;
         summary_ctx.n_prompt = n_prompt_tokens;
         summary_ctx.n_gen = p.n_gen;
         summary_ctx.n_repeat = (int) std::max<size_t>(1, std::max(ttft_ms.size(), total_ms.size()));
@@ -522,6 +679,22 @@ int main(int argc, char ** argv) {
         summary_ctx.total_ms = total_ms.empty() ? summary_ctx.ttft_ms : average_or_zero(total_ms);
         summary_ctx.cold_prefill_count = (int) cold_ttft_ms.size();
         summary_ctx.warm_prefill_count = (int) warm_ttft_ms.size();
+        summary_ctx.speculative_type = p.spec_type;
+        summary_ctx.draft_tokens_generated = draft_tokens_generated;
+        summary_ctx.draft_tokens_accepted = draft_tokens_accepted;
+        summary_ctx.verification_steps = verification_steps;
+        summary_ctx.target_tokens_evaluated = target_tokens_evaluated;
+        summary_ctx.draft_time_ms = draft_time_ms;
+        summary_ctx.target_verify_time_ms = target_verify_time_ms;
+        summary_ctx.generation_token_hash = generation_token_hash;
+        summary_ctx.generation_tokens_consistent = generation_tokens_consistent;
+        summary_ctx.speculative_stage3 = p.spec_stage3;
+        summary_ctx.stage3_gate_enabled_repeats = stage3_gate_enabled_repeats;
+        summary_ctx.stage3_gate_disabled_repeats = stage3_gate_disabled_repeats;
+        summary_ctx.stage3_spec_calibration_outputs = stage3_spec_calibration_outputs;
+        summary_ctx.stage3_base_calibration_outputs = stage3_base_calibration_outputs;
+        summary_ctx.stage3_spec_calibration_ms = stage3_spec_calibration_ms;
+        summary_ctx.stage3_base_calibration_ms = stage3_base_calibration_ms;
         summary_ctx.vram_peak_bytes = vram_peak_bytes;
         summary_ctx.vram_total_bytes = vram_total_bytes;
         summary_ctx.vram_device_baseline_bytes = vram_device_baseline_bytes;
@@ -575,7 +748,7 @@ int main(int argc, char ** argv) {
 
     for (int rep = 0; rep < p.n_repeat; ++rep) {
         llama_memory_clear(llama_get_memory(ctx), true);
-        if (p.moe_reset_cache_between_repeats) {
+        if (p.moe_offload && p.moe_reset_cache_between_repeats) {
             llama_moe::slot_pool_reset_cache();
         }
         llama_perf_context_reset(ctx);
@@ -601,18 +774,205 @@ int main(int argc, char ** argv) {
         }
         write_summary(false);
 
-        llama_token token = greedy_token(ctx, vocab_size);
-        for (int gen = 0; gen < p.n_gen; ++gen) {
-            batch = llama_batch_get_one(&token, 1);
-            llama_moe::set_profile_request_context(rep, gen + 1, "decode");
-            if (llama_decode(ctx, batch) != 0) {
-                fprintf(stderr, "decode failed at gen %d (rep %d)\n", gen, rep);
+        llama_token id_last = greedy_token(ctx, 0, vocab_size);
+
+        llama_tokens prompt_tgt(prompt_tokens.begin(), prompt_tokens.begin() + n_prompt_tokens);
+        prompt_tgt.reserve((size_t) p.n_ctx);
+
+        common_speculative_ptr spec;
+        if (speculative_enabled) {
+            spec.reset(common_speculative_init(speculative_params, 1));
+            if (!spec) {
+                fprintf(stderr, "failed to initialize speculative decoding\n");
                 exit_code = 1;
                 break;
             }
-            token = greedy_token(ctx, vocab_size);
+            common_speculative_begin(spec.get(), 0, prompt_tgt);
+        }
+
+        llama_batch batch_tgt = llama_batch_init(std::max(1, 1 + speculative_n_max), 0, 1);
+        llama_tokens draft;
+        llama_tokens generated;
+        generated.reserve((size_t) p.n_gen);
+        common_prompt_checkpoint ckpt;
+        size_t n_draft = 0;
+        size_t n_accepted_from_original = 0;
+        bool replaying_checkpoint = false;
+        bool use_checkpoint = false;
+        int n_past = n_prompt_tokens;
+        uint64_t verification_steps_rep = 0;
+        bool decode_failed = false;
+
+        enum class stage3_gate_phase {
+            spec_calibration,
+            base_calibration,
+            enabled,
+            disabled,
+        };
+        stage3_gate_phase gate_phase = p.spec_stage3
+            ? stage3_gate_phase::spec_calibration
+            : stage3_gate_phase::enabled;
+        uint64_t gate_spec_outputs_rep = 0;
+        uint64_t gate_base_outputs_rep = 0;
+        double gate_spec_ms_rep = 0.0;
+        double gate_base_ms_rep = 0.0;
+        double cycle_start_ms = now_ms();
+
+        while ((int) generated.size() < p.n_gen) {
+            if (draft.empty()) {
+                cycle_start_ms = now_ms();
+                ckpt.update_pos(
+                        prompt_tgt.size(),
+                        llama_memory_seq_pos_min(llama_get_memory(ctx), 0),
+                        llama_memory_seq_pos_max(llama_get_memory(ctx), 0));
+
+                const int remaining = p.n_gen - (int) generated.size();
+                const bool gate_allows_draft = gate_phase == stage3_gate_phase::spec_calibration ||
+                    gate_phase == stage3_gate_phase::enabled;
+                if (spec && gate_allows_draft && remaining > 1) {
+                    const double t_draft_start = now_ms();
+                    common_speculative_get_draft_params(spec.get(), 0) = {
+                        /* .drafting = */ true,
+                        /* .n_max    = */ remaining - 1,
+                        /* .n_past   = */ n_past,
+                        /* .id_last  = */ id_last,
+                        /* .prompt   = */ &prompt_tgt,
+                        /* .result   = */ &draft,
+                    };
+                    common_speculative_draft(spec.get());
+                    draft_time_ms += now_ms() - t_draft_start;
+                }
+
+                n_draft = draft.size();
+                n_accepted_from_original = 0;
+                replaying_checkpoint = false;
+                draft_tokens_generated += n_draft;
+                use_checkpoint = !draft.empty() &&
+                    (seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
+                     (seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && draft.size() > llama_n_rs_seq(ctx)));
+
+                if (use_checkpoint) {
+                    ckpt.update_tgt(ctx, 0, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                }
+            }
+
+            common_batch_clear(batch_tgt);
+            common_batch_add(batch_tgt, id_last, n_past, { 0 }, true);
+            for (size_t i = 0; i < draft.size(); ++i) {
+                common_batch_add(batch_tgt, draft[i], n_past + 1 + (llama_pos) i, { 0 }, true);
+            }
+
+            llama_moe::set_profile_request_context(rep, (int) verification_steps_rep + 1, "decode");
+            const double t_verify_start = now_ms();
+            if (llama_decode(ctx, batch_tgt) != 0) {
+                fprintf(stderr, "decode failed at output token %zu (rep %d)\n", generated.size(), rep);
+                exit_code = 1;
+                decode_failed = true;
+                break;
+            }
+            if (!common_speculative_process(spec.get(), batch_tgt)) {
+                fprintf(stderr, "speculative batch processing failed at output token %zu (rep %d)\n", generated.size(), rep);
+                exit_code = 1;
+                decode_failed = true;
+                break;
+            }
+            target_verify_time_ms += now_ms() - t_verify_start;
+            ++verification_steps;
+            ++verification_steps_rep;
+            target_tokens_evaluated += (uint64_t) batch_tgt.n_tokens;
+
+            llama_tokens ids = greedy_sample_and_accept_n(ctx, draft, vocab_size);
+            GGML_ASSERT(!ids.empty());
+
+            if (!replaying_checkpoint) {
+                n_accepted_from_original = ids.size() - 1;
+            }
+
+            const uint32_t n_rollback = (uint32_t) draft.size() + 1u - (uint32_t) ids.size();
+            if (use_checkpoint && n_rollback > 0) {
+                draft = std::move(ids);
+                replaying_checkpoint = true;
+                ckpt.load_tgt(ctx, 0, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                common_context_seq_rm(ctx, 0, ckpt.pos_max + 1, -1);
+                n_past = (int) prompt_tgt.size();
+                continue;
+            }
+
+            if (spec && n_draft > 0) {
+                common_speculative_accept(spec.get(), 0, (uint16_t) n_accepted_from_original);
+                draft_tokens_accepted += n_accepted_from_original;
+            }
+
+            for (llama_token id : ids) {
+                prompt_tgt.push_back(id_last);
+                id_last = id;
+                generated.push_back(id);
+            }
+            n_past = (int) prompt_tgt.size();
+
+            if (n_rollback > 0) {
+                common_context_seq_rm(ctx, 0, n_past, -1);
+            }
+
+            if (p.spec_stage3) {
+                const double cycle_ms = now_ms() - cycle_start_ms;
+                if (gate_phase == stage3_gate_phase::spec_calibration && n_draft > 0) {
+                    gate_spec_outputs_rep += ids.size();
+                    gate_spec_ms_rep += cycle_ms;
+                    if (gate_spec_outputs_rep >= (uint64_t) p.spec_stage3_calibration_tokens) {
+                        gate_phase = stage3_gate_phase::base_calibration;
+                    }
+                } else if (gate_phase == stage3_gate_phase::base_calibration) {
+                    gate_base_outputs_rep += ids.size();
+                    gate_base_ms_rep += cycle_ms;
+                    if (gate_base_outputs_rep >= (uint64_t) p.spec_stage3_calibration_tokens) {
+                        const double spec_ms_per_output = gate_spec_ms_rep / (double) gate_spec_outputs_rep;
+                        const double base_ms_per_output = gate_base_ms_rep / (double) gate_base_outputs_rep;
+                        const bool enable = spec_ms_per_output < 0.98 * base_ms_per_output;
+                        gate_phase = enable ? stage3_gate_phase::enabled : stage3_gate_phase::disabled;
+                        if (enable) {
+                            ++stage3_gate_enabled_repeats;
+                        } else {
+                            ++stage3_gate_disabled_repeats;
+                        }
+                        fprintf(stderr, "[moe-bench] Stage 3 gate rep=%d spec=%.2f ms/token base=%.2f ms/token decision=%s\n",
+                                rep, spec_ms_per_output, base_ms_per_output, enable ? "enabled" : "disabled");
+                    }
+                }
+            }
+
+            draft.clear();
             update_vram_peak();
             dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
+        }
+
+        llama_batch_free(batch_tgt);
+        if (decode_failed) {
+            break;
+        }
+
+        stage3_spec_calibration_outputs += gate_spec_outputs_rep;
+        stage3_base_calibration_outputs += gate_base_outputs_rep;
+        stage3_spec_calibration_ms += gate_spec_ms_rep;
+        stage3_base_calibration_ms += gate_base_ms_rep;
+
+        const uint64_t token_hash = hash_tokens(generated);
+        if (generation_token_hash == 0) {
+            generation_token_hash = token_hash;
+        } else if (generation_token_hash != token_hash) {
+            generation_tokens_consistent = false;
+        }
+
+        if (rep == 0 && !p.output_tokens.empty()) {
+            std::ofstream out(p.output_tokens, std::ios::out | std::ios::trunc);
+            if (!out) {
+                fprintf(stderr, "failed to open token output: %s\n", p.output_tokens.c_str());
+                exit_code = 1;
+                break;
+            }
+            for (size_t i = 0; i < generated.size(); ++i) {
+                out << i << ',' << generated[i] << '\n';
+            }
         }
 
         const double t2 = now_ms();
@@ -630,7 +990,7 @@ int main(int argc, char ** argv) {
 
     fprintf(stderr, "[moe-bench] computing summary...\n");
     const llama_moe::profile_snapshot profile = write_summary(true);
-    if (profile.prefill.rows + profile.decode.rows == 0) {
+    if (p.moe_offload && profile.prefill.rows + profile.decode.rows == 0) {
         fprintf(stderr, "warning: no MoE profile rows were recorded; check that the model is a repacked *.moe.gguf and that the run entered streaming mode\n");
     }
 
@@ -638,6 +998,7 @@ int main(int argc, char ** argv) {
             (unsigned long long) profile.prefill.rows,
             (unsigned long long) profile.decode.rows);
 
+    llama_moe::slot_pool_shutdown_io();
     llama_free(ctx);
     llama_model_free(model);
     llama_backend_free();
