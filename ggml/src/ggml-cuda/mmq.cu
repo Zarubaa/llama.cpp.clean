@@ -170,8 +170,12 @@ void ggml_cuda_mul_mat_q(
     const int64_t ne_get_rows = ne12 * n_expert_used;
     GGML_ASSERT(ne1 == n_expert_used);
 
-    ggml_cuda_pool_alloc<int32_t> ids_src1(ctx.pool(), ne_get_rows);
-    ggml_cuda_pool_alloc<int32_t> ids_dst(ctx.pool(), ne_get_rows);
+    const int64_t mmq_J_max = ggml_cuda_mmq_get_J_max(src0->type, fallback, cc, ne12);
+    GGML_ASSERT(mmq_J_max > 0);
+    const int64_t ne_get_rows_padded = ((ne_get_rows + mmq_J_max - 1) / mmq_J_max) * mmq_J_max;
+
+    ggml_cuda_pool_alloc<int32_t> ids_src1(ctx.pool(), ne_get_rows_padded);
+    ggml_cuda_pool_alloc<int32_t> ids_dst(ctx.pool(), ne_get_rows_padded);
     ggml_cuda_pool_alloc<int32_t> expert_bounds(ctx.pool(), ne02 + 1);
 
     {
@@ -182,13 +186,20 @@ void ggml_cuda_mul_mat_q(
         ggml_cuda_launch_mm_ids_helper((const int32_t *) ids->data, ids_src1.get(), ids_dst.get(), expert_bounds.get(),
             ne02, ne12, n_expert_used, ne11, si1, sis1, stream);
         CUDA_CHECK(cudaGetLastError());
+
+        if (ne_get_rows_padded > ne_get_rows) {
+            CUDA_CHECK(cudaMemsetAsync(ids_src1.get() + ne_get_rows, 0,
+                (ne_get_rows_padded - ne_get_rows)*sizeof(int32_t), stream));
+            CUDA_CHECK(cudaMemsetAsync(ids_dst.get() + ne_get_rows, 0,
+                (ne_get_rows_padded - ne_get_rows)*sizeof(int32_t), stream));
+        }
     }
 
-    const size_t nbytes_src1_q8_1 = ne12*n_expert_used*ne10_padded * sizeof(block_q8_1)/QK8_1 +
-        ggml_cuda_mmq_get_J_max(src0->type, fallback, cc, ne11) * sizeof(block_q8_1_mmq);
+    const size_t nbytes_src1_q8_1 = ne_get_rows_padded*ne10_padded * sizeof(block_q8_1)/QK8_1 +
+        mmq_J_max * sizeof(block_q8_1_mmq);
     ggml_cuda_pool_alloc<char> src1_q8_1(ctx.pool(), nbytes_src1_q8_1);
 
-    const int64_t ne11_flat = ne12*n_expert_used;
+    const int64_t ne11_flat = ne_get_rows_padded;
     const int64_t ne12_flat = 1;
     const int64_t ne13_flat = 1;
 
@@ -215,7 +226,7 @@ void ggml_cuda_mul_mat_q(
     // Note that ne02 is used instead of ne12 because the number of y channels determines the z dimension of the CUDA grid.
     const mmq_args args = {
         src0_d, src0->type, (const int *) src1_q8_1.get(), ids_dst.get(), expert_bounds.get(), dst_d,
-        ne00, ne01, ne_get_rows, s01, ne_get_rows, s1,
+        ne00, ne01, ne_get_rows, s01, ne_get_rows_padded, s1,
         ne02, ne02, s02, s12, s2,
         ne03, ne13, s03, s13, s3,
         ne12};

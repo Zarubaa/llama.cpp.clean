@@ -374,6 +374,15 @@ std::string format_summary(
             << "  hot_start=" << (ctx.hot_start ? "true" : "false")
             << "\n\n";
     }
+    if (!ctx.spec_type.empty() && ctx.spec_type != "none") {
+        const double accept_rate = ctx.spec_draft_tokens == 0 ? 0.0 :
+            100.0 * (double) ctx.spec_draft_accepted / (double) ctx.spec_draft_tokens;
+        out << "speculative: " << ctx.spec_type
+            << "  draft_n_max=" << ctx.spec_draft_n_max
+            << "  draft_tokens=" << ctx.spec_draft_tokens
+            << "  draft_accepted=" << ctx.spec_draft_accepted
+            << "  accept_rate=" << std::setprecision(1) << accept_rate << "%\n\n";
+    }
 
     out << "phase     tokens   total_ms   per_token_ms   tok/s\n";
     out << "prefill   " << std::setw(6) << ctx.n_prompt

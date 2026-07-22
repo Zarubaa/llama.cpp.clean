@@ -1,0 +1,14 @@
+date_utc=2026-07-22T11:57:03Z
+container=llama-cpp-clean-dev
+cwd=/workspace
+model=/workspace/models/Qwen3.6-35BA3B-MTP.moe.gguf
+vram_mb=6000
+prompt_tokens_target=1024
+n_predict=1024
+ctx=2048
+batch=1024
+ubatch=1024
+spec_type=draft-mtp
+server_pid=23969
+server_ready=1
+request_exit_status=0

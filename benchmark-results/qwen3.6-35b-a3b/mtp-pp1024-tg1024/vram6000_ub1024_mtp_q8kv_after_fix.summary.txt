@@ -1,0 +1,37 @@
+MoE offload summary
+rows: 1386
+experts required: 15516
+cache hits: 11214
+cache misses: 4302
+cache hit rate: 72.27%
+ssd_bytes: 14378729472
+ssd_reads: 12906
+ssd_read_us: 3332442
+h2d_us: 1338476
+compute_us: 941993
+stall_us: 232324
+pred_us: 1337
+pred_observe_us: 478
+pred_score_us: 859
+callback_wall_us: 3623822
+topk_d2h_us: 18426
+slot_ids_h2d_us: 6338
+slot_table_h2d_us: 0
+eamc_rows_scored: 0
+eamc_cosine_us: 0
+eamc_score_materialize_us: 0
+eamc_score_cache_hits: 0
+eamc_score_cache_misses: 0
+routes_required: 352320
+routes_hit: 62154
+routes_persistent: 336989
+k_empty_admit: 1819
+k_victim_admit: 660
+k_scratch: 1823
+route_rank_us: 3741
+request_wall_us: 10388912
+request_end_us: 58866
+predictor_end_us: 6
+predictor_save_us: 0
+profile_flush_us: 16237
+sidecar_write_bytes: 0

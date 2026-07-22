@@ -5,6 +5,9 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 
+#include "common.h"
+#include "speculative.h"
+
 #include "moe-offload/runtime.h"
 #include "moe-offload/slot_pool.h"
 
@@ -51,9 +54,17 @@ struct bench_params {
     bool moe_reset_cache_between_repeats = false;
     bool moe_warm_cache = false;
     bool moe_hot_start = false;
+    std::string spec_type = "none";
+    int spec_draft_n_max = 3;
+    int spec_draft_n_min = 0;
+    float spec_draft_p_min = 0.0f;
+    int spec_draft_ngl = -1;
+    ggml_type spec_draft_type_k = GGML_TYPE_F16;
+    ggml_type spec_draft_type_v = GGML_TYPE_F16;
 };
 
 static bool parse_args(int argc, char ** argv, bench_params & p) {
+    bool ok = true;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         auto value_for = [&](const char * name, std::string & value) -> bool {
@@ -76,6 +87,43 @@ static bool parse_args(int argc, char ** argv, bench_params & p) {
             value = std::atoi(text.c_str());
             return true;
         };
+        auto layers_for = [&](const char * name, int & value) -> bool {
+            std::string text;
+            if (!value_for(name, text)) {
+                return false;
+            }
+            if (text == "auto") {
+                value = -1;
+            } else if (text == "all") {
+                value = -2;
+            } else {
+                value = std::atoi(text.c_str());
+            }
+            return true;
+        };
+        auto float_for = [&](const char * name, float & value) -> bool {
+            std::string text;
+            if (!value_for(name, text)) {
+                return false;
+            }
+            value = std::atof(text.c_str());
+            return true;
+        };
+        auto type_for = [&](const char * name, ggml_type & value) -> bool {
+            std::string text;
+            if (!value_for(name, text)) {
+                return false;
+            }
+            for (int t = 0; t < GGML_TYPE_COUNT; ++t) {
+                if (text == ggml_type_name((ggml_type) t)) {
+                    value = (ggml_type) t;
+                    return true;
+                }
+            }
+            fprintf(stderr, "unknown ggml type for %s: %s\n", name, text.c_str());
+            ok = false;
+            return true;
+        };
 
         if (value_for("--model", p.model)) {}
         else if (int_for("--pp", p.n_prompt)) {}
@@ -86,11 +134,23 @@ static bool parse_args(int argc, char ** argv, bench_params & p) {
         else if (value_for("--moe-eamc-path", p.moe_eamc_path)) {}
         else if (value_for("--moe-profile-csv", p.moe_profile_csv)) {}
         else if (value_for("--moe-profile-summary", p.moe_profile_summary)) {}
-        else if (int_for("-ngl", p.n_gpu_layers)) {}
+        else if (layers_for("-ngl", p.n_gpu_layers)) {}
+        else if (layers_for("--gpu-layers", p.n_gpu_layers)) {}
+        else if (layers_for("--n-gpu-layers", p.n_gpu_layers)) {}
         else if (int_for("-c", p.n_ctx)) {}
         else if (int_for("-ub", p.n_ubatch)) {}
         else if (int_for("--ubatch", p.n_ubatch)) {}
         else if (int_for("--ubatch-size", p.n_ubatch)) {}
+        else if (value_for("--spec-type", p.spec_type)) {}
+        else if (int_for("--spec-draft-n-max", p.spec_draft_n_max)) {}
+        else if (int_for("--spec-draft-n-min", p.spec_draft_n_min)) {}
+        else if (float_for("--spec-draft-p-min", p.spec_draft_p_min)) {}
+        else if (layers_for("--spec-draft-ngl", p.spec_draft_ngl)) {}
+        else if (layers_for("-ngld", p.spec_draft_ngl)) {}
+        else if (layers_for("--gpu-layers-draft", p.spec_draft_ngl)) {}
+        else if (layers_for("--n-gpu-layers-draft", p.spec_draft_ngl)) {}
+        else if (type_for("--spec-draft-type-k", p.spec_draft_type_k)) {}
+        else if (type_for("--spec-draft-type-v", p.spec_draft_type_v)) {}
         else if (arg == "--moe-reset-cache-between-repeats") { p.moe_reset_cache_between_repeats = true; }
         else if (arg == "--moe-warm-cache") { p.moe_warm_cache = true; }
         else if (arg == "--moe-hot-start") { p.moe_hot_start = true; }
@@ -99,7 +159,9 @@ static bool parse_args(int argc, char ** argv, bench_params & p) {
     if (p.n_repeat < 1) p.n_repeat = 1;
     if (p.n_prompt < 1) p.n_prompt = 1;
     if (p.n_gen < 1) p.n_gen = 1;
-    return !p.model.empty();
+    if (p.spec_draft_n_max < 0) p.spec_draft_n_max = 0;
+    if (p.spec_draft_n_min < 0) p.spec_draft_n_min = 0;
+    return ok && !p.model.empty();
 }
 
 static double now_ms() {
@@ -342,8 +404,8 @@ static std::string build_summary(
     return out.str();
 }
 
-static llama_token greedy_token(llama_context * ctx, int vocab_size) {
-    float * logits = llama_get_logits_ith(ctx, 0);
+static llama_token greedy_token_ith(llama_context * ctx, int vocab_size, int32_t idx) {
+    float * logits = llama_get_logits_ith(ctx, idx);
     if (!logits) {
         return 0;
     }
@@ -358,10 +420,38 @@ static llama_token greedy_token(llama_context * ctx, int vocab_size) {
     return token;
 }
 
+static void fill_token_batch(
+        llama_batch & batch,
+        const llama_token * tokens,
+        int n_tokens,
+        llama_pos pos0,
+        bool logits_all) {
+    common_batch_clear(batch);
+    for (int i = 0; i < n_tokens; ++i) {
+        common_batch_add(batch, tokens[i], pos0 + i, { 0 }, logits_all || i == n_tokens - 1);
+    }
+}
+
+static void safe_context_seq_rm_tail(llama_context * ctx, llama_seq_id seq_id, llama_pos p0) {
+    if (!ctx) {
+        return;
+    }
+    const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx), seq_id);
+    if (pos_max < 0 || p0 > pos_max) {
+        return;
+    }
+    common_context_seq_rm(ctx, seq_id, p0, -1);
+}
+
 int main(int argc, char ** argv) {
     bench_params p;
     if (!parse_args(argc, argv, p)) {
-        fprintf(stderr, "Usage: llama-moe-bench --model <path> --pp N --tg N [--repeat N] [--moe-cache-vram-mb MB] [--moe-predictor lru|eamc] [--moe-eamc-path PATH] [--moe-profile-csv PATH] [--moe-profile-summary PATH] [--moe-reset-cache-between-repeats] [--moe-warm-cache] [--moe-hot-start] [-ub N]\n");
+        fprintf(stderr, "Usage: llama-moe-bench --model <path> --pp N --tg N [--repeat N] [--moe-cache-vram-mb MB] [--moe-predictor lru|eamc] [--moe-eamc-path PATH] [--moe-profile-csv PATH] [--moe-profile-summary PATH] [--moe-reset-cache-between-repeats] [--moe-warm-cache] [--moe-hot-start] [-ub N] [--spec-type draft-mtp] [--spec-draft-n-max N] [--spec-draft-n-min N] [--spec-draft-p-min P] [--spec-draft-type-k TYPE] [--spec-draft-type-v TYPE]\n");
+        return 1;
+    }
+    const bool use_mtp = p.spec_type == "draft-mtp";
+    if (p.spec_type != "none" && !use_mtp) {
+        fprintf(stderr, "unsupported --spec-type '%s' (currently supported: none, draft-mtp)\n", p.spec_type.c_str());
         return 1;
     }
 
@@ -407,6 +497,9 @@ int main(int argc, char ** argv) {
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx = p.n_ctx;
     ctx_params.n_batch = std::max(2048, p.n_prompt);
+    if (use_mtp) {
+        ctx_params.n_rs_seq = (uint32_t) std::max(1, p.spec_draft_n_max);
+    }
     if (p.n_ubatch > 0) {
         ctx_params.n_ubatch = (uint32_t) p.n_ubatch;
     }
@@ -429,6 +522,57 @@ int main(int argc, char ** argv) {
     }
     update_vram_peak();
     dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
+
+    llama_context * ctx_dft = nullptr;
+    common_speculative * spec = nullptr;
+    if (use_mtp) {
+        if (llama_model_n_layer_nextn(model) <= 0) {
+            fprintf(stderr, "--spec-type draft-mtp requested, but model has no MTP/nextn layers\n");
+            llama_free(ctx);
+            llama_model_free(model);
+            llama_backend_free();
+            return 1;
+        }
+
+        llama_context_params ctx_params_dft = ctx_params;
+        ctx_params_dft.ctx_type  = LLAMA_CONTEXT_TYPE_MTP;
+        ctx_params_dft.ctx_other = ctx;
+        ctx_params_dft.type_k    = p.spec_draft_type_k;
+        ctx_params_dft.type_v    = p.spec_draft_type_v;
+
+        ctx_dft = llama_init_from_model(model, ctx_params_dft);
+        if (!ctx_dft) {
+            fprintf(stderr, "failed to create MTP draft context\n");
+            llama_free(ctx);
+            llama_model_free(model);
+            llama_backend_free();
+            return 1;
+        }
+
+        common_params_speculative spec_params;
+        spec_params.types = { COMMON_SPECULATIVE_TYPE_DRAFT_MTP };
+        spec_params.draft.ctx_tgt = ctx;
+        spec_params.draft.ctx_dft = ctx_dft;
+        spec_params.draft.n_max = p.spec_draft_n_max;
+        spec_params.draft.n_min = p.spec_draft_n_min;
+        spec_params.draft.p_min = p.spec_draft_p_min;
+        spec_params.draft.n_gpu_layers = p.spec_draft_ngl;
+        spec_params.draft.cache_type_k = p.spec_draft_type_k;
+        spec_params.draft.cache_type_v = p.spec_draft_type_v;
+
+        spec = common_speculative_init(spec_params, /*n_seq=*/ 1);
+        if (!spec) {
+            fprintf(stderr, "failed to initialize MTP speculative decoder\n");
+            llama_free(ctx_dft);
+            llama_free(ctx);
+            llama_model_free(model);
+            llama_backend_free();
+            return 1;
+        }
+
+        update_vram_peak();
+        dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
+    }
 
     char model_desc_buf[512] = {};
     std::string model_desc;
@@ -466,12 +610,20 @@ int main(int argc, char ** argv) {
                     hot_start_path.c_str());
         } else if (!llama_moe::slot_pool_hot_start(preload)) {
             fprintf(stderr, "[moe-bench] ERROR: MoE hot-start preload failed\n");
+            if (spec) {
+                common_speculative_free(spec);
+            }
+            if (ctx_dft) {
+                llama_free(ctx_dft);
+            }
             llama_free(ctx);
             llama_model_free(model);
             llama_backend_free();
             return 1;
         }
     }
+
+    llama_batch batch = llama_batch_init((int32_t) ctx_params.n_batch, 0, 1);
 
     std::vector<double> ttft_ms;
     std::vector<double> cold_ttft_ms;
@@ -483,6 +635,9 @@ int main(int argc, char ** argv) {
     warm_ttft_ms.reserve((size_t) p.n_repeat);
     tpot_ms.reserve((size_t) p.n_repeat);
     total_ms.reserve((size_t) p.n_repeat);
+
+    uint64_t spec_draft_tokens = 0;
+    uint64_t spec_draft_accepted = 0;
 
     int exit_code = 0;
 
@@ -515,6 +670,10 @@ int main(int argc, char ** argv) {
         summary_ctx.cache_reset_between_repeats = p.moe_reset_cache_between_repeats;
         summary_ctx.warm_cache = p.moe_warm_cache;
         summary_ctx.hot_start = p.moe_hot_start;
+        summary_ctx.spec_type = use_mtp ? p.spec_type : "none";
+        summary_ctx.spec_draft_n_max = use_mtp ? p.spec_draft_n_max : 0;
+        summary_ctx.spec_draft_tokens = spec_draft_tokens;
+        summary_ctx.spec_draft_accepted = spec_draft_accepted;
         summary_ctx.ttft_ms = average_or_zero(ttft_ms);
         summary_ctx.cold_ttft_ms = average_or_zero(cold_ttft_ms);
         summary_ctx.warm_ttft_ms = average_or_zero(warm_ttft_ms);
@@ -559,10 +718,32 @@ int main(int argc, char ** argv) {
     if (p.moe_warm_cache) {
         fprintf(stderr, "[moe-bench] warming MoE cache before measured repeats\n");
         llama_memory_clear(llama_get_memory(ctx), true);
+        if (ctx_dft) {
+            llama_memory_clear(llama_get_memory(ctx_dft), true);
+        }
         llama_moe::set_profile_request_context(-1, -1, "warmup");
-        llama_batch warm_batch = llama_batch_get_one(prompt_tokens.data(), n_prompt_tokens);
-        if (llama_decode(ctx, warm_batch) != 0) {
+        fill_token_batch(batch, prompt_tokens.data(), n_prompt_tokens, 0, use_mtp);
+        if (llama_decode(ctx, batch) != 0) {
             fprintf(stderr, "warm-cache prefill decode failed\n");
+            llama_batch_free(batch);
+            if (spec) {
+                common_speculative_free(spec);
+            }
+            if (ctx_dft) {
+                llama_free(ctx_dft);
+            }
+            llama_free(ctx);
+            llama_model_free(model);
+            llama_backend_free();
+            return 1;
+        }
+        if (spec && !common_speculative_process(spec, batch)) {
+            fprintf(stderr, "warm-cache speculative process failed\n");
+            llama_batch_free(batch);
+            common_speculative_free(spec);
+            if (ctx_dft) {
+                llama_free(ctx_dft);
+            }
             llama_free(ctx);
             llama_model_free(model);
             llama_backend_free();
@@ -575,16 +756,27 @@ int main(int argc, char ** argv) {
 
     for (int rep = 0; rep < p.n_repeat; ++rep) {
         llama_memory_clear(llama_get_memory(ctx), true);
+        if (ctx_dft) {
+            llama_memory_clear(llama_get_memory(ctx_dft), true);
+        }
         if (p.moe_reset_cache_between_repeats) {
             llama_moe::slot_pool_reset_cache();
         }
         llama_perf_context_reset(ctx);
+        if (ctx_dft) {
+            llama_perf_context_reset(ctx_dft);
+        }
 
         const double t0 = now_ms();
         llama_moe::set_profile_request_context(rep, 0, "prefill");
-        llama_batch batch = llama_batch_get_one(prompt_tokens.data(), n_prompt_tokens);
+        fill_token_batch(batch, prompt_tokens.data(), n_prompt_tokens, 0, use_mtp);
         if (llama_decode(ctx, batch) != 0) {
             fprintf(stderr, "prefill decode failed (rep %d)\n", rep);
+            exit_code = 1;
+            break;
+        }
+        if (spec && !common_speculative_process(spec, batch)) {
+            fprintf(stderr, "prefill speculative process failed (rep %d)\n", rep);
             exit_code = 1;
             break;
         }
@@ -601,18 +793,110 @@ int main(int argc, char ** argv) {
         }
         write_summary(false);
 
-        llama_token token = greedy_token(ctx, vocab_size);
-        for (int gen = 0; gen < p.n_gen; ++gen) {
-            batch = llama_batch_get_one(&token, 1);
-            llama_moe::set_profile_request_context(rep, gen + 1, "decode");
-            if (llama_decode(ctx, batch) != 0) {
-                fprintf(stderr, "decode failed at gen %d (rep %d)\n", gen, rep);
-                exit_code = 1;
-                break;
+        llama_token token = greedy_token_ith(ctx, vocab_size, use_mtp ? n_prompt_tokens - 1 : 0);
+        if (use_mtp) {
+            llama_tokens history(prompt_tokens.begin(), prompt_tokens.begin() + n_prompt_tokens);
+            common_speculative_begin(spec, 0, history);
+
+            int generated = 0;
+            int n_past = n_prompt_tokens;
+            std::vector<llama_token> draft;
+
+            while (generated < p.n_gen) {
+                const int remaining = p.n_gen - generated;
+                const int n_draft_max = std::min(p.spec_draft_n_max, std::max(0, remaining - 1));
+
+                draft.clear();
+                if (n_draft_max > 0) {
+                    auto & dp = common_speculative_get_draft_params(spec, 0);
+                    dp = {
+                        /* .drafting = */ true,
+                        /* .n_max    = */ n_draft_max,
+                        /* .n_past   = */ n_past,
+                        /* .id_last  = */ token,
+                        /* .prompt   = */ &history,
+                        /* .result   = */ &draft,
+                    };
+                    llama_moe::set_profile_request_context(rep, generated + 1, "decode");
+                    common_speculative_draft(spec);
+                    if ((int) draft.size() > n_draft_max) {
+                        draft.resize((size_t) n_draft_max);
+                    }
+                    spec_draft_tokens += draft.size();
+
+                    safe_context_seq_rm_tail(ctx_dft, 0, n_past);
+                }
+
+                common_batch_clear(batch);
+                common_batch_add(batch, token, n_past, { 0 }, true);
+                for (size_t i = 0; i < draft.size(); ++i) {
+                    common_batch_add(batch, draft[i], n_past + 1 + (llama_pos) i, { 0 }, true);
+                }
+
+                llama_moe::set_profile_request_context(rep, generated + 1, "decode");
+                if (llama_decode(ctx, batch) != 0) {
+                    fprintf(stderr, "decode failed at generated=%d (rep %d)\n", generated, rep);
+                    exit_code = 1;
+                    break;
+                }
+                if (!common_speculative_process(spec, batch)) {
+                    fprintf(stderr, "decode speculative process failed at generated=%d (rep %d)\n", generated, rep);
+                    exit_code = 1;
+                    break;
+                }
+
+                std::vector<llama_token> accepted;
+                accepted.reserve(draft.size() + 1);
+
+                int n_draft_accepted = 0;
+                for (size_t i = 0; i < draft.size(); ++i) {
+                    const llama_token id = greedy_token_ith(ctx, vocab_size, (int32_t) i);
+                    accepted.push_back(id);
+                    if (id != draft[i]) {
+                        break;
+                    }
+                    ++n_draft_accepted;
+                }
+                if (n_draft_accepted == (int) draft.size()) {
+                    accepted.push_back(greedy_token_ith(ctx, vocab_size, (int32_t) draft.size()));
+                }
+
+                if (!draft.empty()) {
+                    spec_draft_accepted += (uint64_t) n_draft_accepted;
+                    common_speculative_accept(spec, 0, (uint16_t) n_draft_accepted);
+                }
+
+                history.push_back(token);
+                for (int i = 0; i < n_draft_accepted; ++i) {
+                    history.push_back(draft[(size_t) i]);
+                }
+                n_past += 1 + n_draft_accepted;
+
+                safe_context_seq_rm_tail(ctx, 0, n_past);
+                safe_context_seq_rm_tail(ctx_dft, 0, n_past);
+
+                token = accepted.back();
+                generated += (int) accepted.size();
+
+                update_vram_peak();
+                dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
             }
-            token = greedy_token(ctx, vocab_size);
-            update_vram_peak();
-            dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
+        } else {
+            for (int gen = 0; gen < p.n_gen; ++gen) {
+                fill_token_batch(batch, &token, 1, n_prompt_tokens + gen, true);
+                llama_moe::set_profile_request_context(rep, gen + 1, "decode");
+                if (llama_decode(ctx, batch) != 0) {
+                    fprintf(stderr, "decode failed at gen %d (rep %d)\n", gen, rep);
+                    exit_code = 1;
+                    break;
+                }
+                token = greedy_token_ith(ctx, vocab_size, 0);
+                update_vram_peak();
+                dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
+            }
+        }
+        if (exit_code != 0) {
+            break;
         }
 
         const double t2 = now_ms();
@@ -638,6 +922,13 @@ int main(int argc, char ** argv) {
             (unsigned long long) profile.prefill.rows,
             (unsigned long long) profile.decode.rows);
 
+    llama_batch_free(batch);
+    if (spec) {
+        common_speculative_free(spec);
+    }
+    if (ctx_dft) {
+        llama_free(ctx_dft);
+    }
     llama_free(ctx);
     llama_model_free(model);
     llama_backend_free();

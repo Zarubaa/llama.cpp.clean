@@ -122,6 +122,10 @@ struct profile_summary_context {
     bool cache_reset_between_repeats = false;
     bool warm_cache = false;
     bool hot_start = false;
+    std::string spec_type;
+    int spec_draft_n_max = 0;
+    uint64_t spec_draft_tokens = 0;
+    uint64_t spec_draft_accepted = 0;
     double ttft_ms = 0.0;
     double cold_ttft_ms = 0.0;
     double warm_ttft_ms = 0.0;
