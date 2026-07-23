@@ -1,0 +1,9 @@
+run	ub	effective_ub	prefill_ms_per_token	decode_ms_per_token	prefill_hit_pct	decode_hit_pct	prefill_route_hit_pct	decode_route_hit_pct	decode_ssd_read_gb	vram_peak_gb	profile_rows_prefill	profile_rows_decode	file
+01	512	512	5.52	24.40	17.9	91.6	43.4	91.6	49.03	9.25	80	40960	run01-ub512-summary.txt
+02	1024	1024	4.29	27.27	0.0	92.8	0.0	92.8	42.22	9.74	40	40960	run02-ub1024-summary.txt
+03	1024	1024	4.29	27.39	0.0	92.8	0.0	92.8	42.22	9.74	40	40960	run03-ub1024-summary.txt
+04	512	512	5.55	30.39	17.9	91.6	43.4	91.6	49.03	9.25	80	40960	run04-ub512-summary.txt
+05	512	512	5.50	30.13	17.9	91.6	43.4	91.6	49.03	9.25	80	40960	run05-ub512-summary.txt
+06	1024	1024	4.28	27.63	0.0	92.8	0.0	92.8	42.22	9.74	40	40960	run06-ub1024-summary.txt
+07	1024	1024	4.29	27.56	0.0	92.8	0.0	92.8	42.22	9.74	40	40960	run07-ub1024-summary.txt
+08	512	512	5.45	30.11	17.9	91.6	43.4	91.6	49.03	9.25	80	40960	run08-ub512-summary.txt
