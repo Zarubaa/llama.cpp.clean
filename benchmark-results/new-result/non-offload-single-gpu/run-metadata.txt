@@ -1,0 +1,9 @@
+branch: 0716_eamc
+commit: 4306ebc289371aa6c2783396bbb05836b6372301
+model: /workspace/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+mode: non-offload, original GGUF, single visible GPU
+CUDA_VISIBLE_DEVICES: 0
+pp: 1024
+tg: 1024
+repetitions: 3
+command: /workspace/build-moe/bin/llama-bench -m /workspace/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf -p 1024 -n 1024 -r 3 -ngl 99 -sm none -mg 0 -mmp 0 -o md
