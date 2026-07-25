@@ -29,8 +29,12 @@
 
 #include <atomic>
 #include <cstddef>
+#include <condition_variable>
+#include <cstdlib>
 #include <cstdio>
+#include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -38,16 +42,43 @@ namespace {
 // One H2D stream per active device, created lazily on first use.
 // MVP assumption: single CUDA device. Multi-device is post-MVP.
 struct moe_io_state {
+    struct prefill_ready_state {
+        cudaEvent_t event = nullptr;
+        bool ready = false;
+        bool failed = false;
+        bool consumed = false;
+        std::condition_variable cv;
+    };
+
     std::mutex                mutex;
     cudaStream_t              h2d_stream = nullptr;
     int                       stream_device = -1;
     std::vector<cudaEvent_t>  event_pool;        // free events
     size_t                    events_in_use = 0; // for diagnostics
+    std::unordered_map<int64_t, std::shared_ptr<prefill_ready_state>> prefill_ready;
+    int prefill_active_kind = 0;
 
     static constexpr size_t kEventPoolHardCap = 4096;
 };
 
 moe_io_state g_state;
+
+static int64_t prefill_key(int32_t slot, int kind) {
+    return ((int64_t) kind << 32) | (uint32_t) slot;
+}
+
+static bool prefill_advance_kind_locked() {
+    while (g_state.prefill_active_kind < 3) {
+        for (const auto & entry : g_state.prefill_ready) {
+            const int kind = (int) (entry.first >> 32);
+            if (kind == g_state.prefill_active_kind && !entry.second->consumed) {
+                return true;
+            }
+        }
+        ++g_state.prefill_active_kind;
+    }
+    return false;
+}
 
 cudaStream_t ensure_h2d_stream() {
     // Caller must hold g_state.mutex.
@@ -103,6 +134,10 @@ void release_event_locked(cudaEvent_t ev) {
 } // namespace
 
 extern "C" {
+
+GGML_BACKEND_API bool moe_io_cuda_prefill_stream_should_split(cudaStream_t stream);
+GGML_BACKEND_API bool moe_io_cuda_prefill_stream_slot_is_miss(int32_t slot);
+GGML_BACKEND_API bool moe_io_cuda_prefill_stream_wait(cudaStream_t stream, int32_t slot);
 
 // Pinned host allocation (cudaHostAllocPortable). Returns nullptr on failure.
 GGML_BACKEND_API void * moe_io_cuda_pinned_alloc(size_t bytes) {
@@ -163,6 +198,141 @@ GGML_BACKEND_API bool moe_io_cuda_compute_wait(ggml_backend_t backend, void * ev
     cudaError_t e = cudaStreamWaitEvent(compute_stream, (cudaEvent_t) ev, 0);
     if (e != cudaSuccess) {
         fprintf(stderr, "[moe-io-cuda] cudaStreamWaitEvent failed: %s\n", cudaGetErrorString(e));
+        return false;
+    }
+    return true;
+}
+
+GGML_BACKEND_API void moe_io_cuda_prefill_stream_clear() {
+    std::lock_guard<std::mutex> lock(g_state.mutex);
+    g_state.prefill_ready.clear();
+    g_state.prefill_active_kind = 0;
+}
+
+GGML_BACKEND_API bool moe_io_cuda_prefill_stream_prepare(int32_t slot, int kind) {
+    if (slot < 0 || kind < 0 || kind >= 3) return false;
+    std::lock_guard<std::mutex> lock(g_state.mutex);
+    const int64_t key = prefill_key(slot, kind);
+    if (g_state.prefill_ready.find(key) != g_state.prefill_ready.end()) {
+        return false;
+    }
+    g_state.prefill_ready.emplace(key, std::make_shared<moe_io_state::prefill_ready_state>());
+    return true;
+}
+
+GGML_BACKEND_API bool moe_io_cuda_prefill_stream_register_ready(int32_t slot, int kind, void * ev) {
+    if (slot < 0 || kind < 0 || kind >= 3 || !ev) return false;
+    std::lock_guard<std::mutex> lock(g_state.mutex);
+    auto it = g_state.prefill_ready.find(prefill_key(slot, kind));
+    if (it == g_state.prefill_ready.end() || it->second->ready || it->second->failed) {
+        return false;
+    }
+    it->second->event = (cudaEvent_t) ev;
+    it->second->ready = true;
+    it->second->cv.notify_all();
+    return true;
+}
+
+GGML_BACKEND_API void moe_io_cuda_prefill_stream_register_failed(int32_t slot, int kind) {
+    if (slot < 0 || kind < 0 || kind >= 3) return;
+    std::lock_guard<std::mutex> lock(g_state.mutex);
+    auto it = g_state.prefill_ready.find(prefill_key(slot, kind));
+    if (it == g_state.prefill_ready.end()) return;
+    it->second->failed = true;
+    it->second->cv.notify_all();
+}
+
+GGML_BACKEND_API bool moe_io_cuda_prefill_stream_should_split(cudaStream_t stream) {
+    std::vector<cudaEvent_t> events;
+    size_t expected = 0;
+    size_t registered = 0;
+    size_t pending = 0;
+    int kind = -1;
+    {
+        std::unique_lock<std::mutex> lock(g_state.mutex);
+        if (!prefill_advance_kind_locked()) {
+            return false;
+        }
+        kind = g_state.prefill_active_kind;
+        for (const auto & entry : g_state.prefill_ready) {
+            auto & state = entry.second;
+            if ((int) (entry.first >> 32) != kind || state->consumed) continue;
+            ++expected;
+            if (!state->ready) {
+                ++pending;
+                continue;
+            }
+            ++registered;
+            const cudaError_t e = cudaEventQuery(state->event);
+            if (e == cudaErrorNotReady) {
+                ++pending;
+            } else if (e != cudaSuccess) {
+                fprintf(stderr, "[moe-io-cuda] prefill cudaEventQuery failed: %s\n", cudaGetErrorString(e));
+                ++pending;
+            }
+        }
+        static int debug_logs = 0;
+        const bool split = kind == 0 && pending > 1;
+        if (std::getenv("LLAMA_MOE_DEBUG_PREFILL_STREAM") && debug_logs < 32) {
+            fprintf(stderr, "[moe-prefill-stream] kind=%d expected=%zu registered=%zu pending=%zu action=%s\n",
+                    kind, expected, registered, pending, split ? "split" : "batched");
+            ++debug_logs;
+        }
+        if (split) {
+            return true;
+        }
+
+        for (const auto & entry : g_state.prefill_ready) {
+            auto & state = entry.second;
+            if ((int) (entry.first >> 32) != kind || state->consumed) continue;
+            state->cv.wait(lock, [&state] { return state->ready || state->failed; });
+            if (state->failed) {
+                GGML_ABORT("MoE prefill stream H2D failed for weight kind %d", kind);
+            }
+            events.push_back(state->event);
+            state->consumed = true;
+        }
+    }
+
+    for (cudaEvent_t ev : events) {
+        const cudaError_t e = cudaStreamWaitEvent(stream, ev, 0);
+        if (e != cudaSuccess) {
+            fprintf(stderr, "[moe-io-cuda] prefill fallback cudaStreamWaitEvent failed: %s\n", cudaGetErrorString(e));
+            return false;
+        }
+    }
+    return false;
+}
+
+GGML_BACKEND_API bool moe_io_cuda_prefill_stream_slot_is_miss(int32_t slot) {
+    std::lock_guard<std::mutex> lock(g_state.mutex);
+    auto it = g_state.prefill_ready.find(prefill_key(slot, g_state.prefill_active_kind));
+    return it != g_state.prefill_ready.end() && !it->second->consumed;
+}
+
+GGML_BACKEND_API bool moe_io_cuda_prefill_stream_wait(cudaStream_t stream, int32_t slot) {
+    cudaEvent_t event = nullptr;
+    int kind = -1;
+    {
+        std::unique_lock<std::mutex> lock(g_state.mutex);
+        kind = g_state.prefill_active_kind;
+        auto it = g_state.prefill_ready.find(prefill_key(slot, kind));
+        if (it == g_state.prefill_ready.end() || it->second->consumed) {
+            return true;
+        }
+        auto & state = it->second;
+        state->cv.wait(lock, [&state] { return state->ready || state->failed; });
+        if (state->failed) {
+            fprintf(stderr, "[moe-io-cuda] prefill H2D failed for slot=%d kind=%d\n", slot, kind);
+            return false;
+        }
+        event = state->event;
+        state->consumed = true;
+    }
+
+    const cudaError_t e = cudaStreamWaitEvent(stream, event, 0);
+    if (e != cudaSuccess) {
+        fprintf(stderr, "[moe-io-cuda] prefill cudaStreamWaitEvent failed: %s\n", cudaGetErrorString(e));
         return false;
     }
     return true;

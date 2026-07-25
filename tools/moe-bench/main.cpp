@@ -444,9 +444,16 @@ int main(int argc, char ** argv) {
             prompt_text.c_str(), (int) prompt_text.size(),
             prompt_tokens.data(), n_tokens_max, true, true);
     if (n_prompt_tokens < 0) {
-        n_prompt_tokens = p.n_prompt;
-        for (int i = 0; i < n_prompt_tokens; ++i) {
-            prompt_tokens[i] = (i % 32000) + 1;
+        prompt_tokens.resize((size_t) -n_prompt_tokens);
+        n_prompt_tokens = llama_tokenize(vocab,
+                prompt_text.c_str(), (int) prompt_text.size(),
+                prompt_tokens.data(), (int) prompt_tokens.size(), true, true);
+        if (n_prompt_tokens < 0) {
+            fprintf(stderr, "failed to tokenize prompt after resizing buffer\n");
+            llama_free(ctx);
+            llama_model_free(model);
+            llama_backend_free();
+            return 1;
         }
     }
     if (n_prompt_tokens > p.n_prompt) {
@@ -602,6 +609,10 @@ int main(int argc, char ** argv) {
         write_summary(false);
 
         llama_token token = greedy_token(ctx, vocab_size);
+        const bool debug_tokens = std::getenv("LLAMA_MOE_DEBUG_TOKENS") != nullptr;
+        if (debug_tokens) {
+            fprintf(stderr, "[moe-bench-token] rep=%d step=0 token=%d\n", rep, (int) token);
+        }
         for (int gen = 0; gen < p.n_gen; ++gen) {
             batch = llama_batch_get_one(&token, 1);
             llama_moe::set_profile_request_context(rep, gen + 1, "decode");
@@ -611,6 +622,9 @@ int main(int argc, char ** argv) {
                 break;
             }
             token = greedy_token(ctx, vocab_size);
+            if (debug_tokens) {
+                fprintf(stderr, "[moe-bench-token] rep=%d step=%d token=%d\n", rep, gen + 1, (int) token);
+            }
             update_vram_peak();
             dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
         }

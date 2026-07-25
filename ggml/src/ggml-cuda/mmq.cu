@@ -3,7 +3,18 @@
 #include "quantize.cuh"
 #include "mmid.cuh"
 
+#include <algorithm>
 #include <cstdint>
+#include <cstdlib>
+#include <vector>
+
+#ifdef LLAMA_MOE_OFFLOAD
+extern "C" {
+    GGML_BACKEND_API bool moe_io_cuda_prefill_stream_should_split(cudaStream_t stream);
+    GGML_BACKEND_API bool moe_io_cuda_prefill_stream_slot_is_miss(int32_t slot);
+    GGML_BACKEND_API bool moe_io_cuda_prefill_stream_wait(cudaStream_t stream, int32_t slot);
+}
+#endif
 
 static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
     switch (args.type_x) {
@@ -219,6 +230,76 @@ void ggml_cuda_mul_mat_q(
         ne02, ne02, s02, s12, s2,
         ne03, ne13, s03, s13, s3,
         ne12};
+
+#ifdef LLAMA_MOE_OFFLOAD
+    if (moe_io_cuda_prefill_stream_should_split(stream)) {
+        std::vector<int32_t> bounds_host((size_t) ne02 + 1);
+        CUDA_CHECK(cudaMemcpyAsync(bounds_host.data(), expert_bounds.get(),
+                                   bounds_host.size() * sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+
+        struct expert_work {
+            int32_t slot;
+            int32_t n_tokens;
+            bool miss;
+        };
+        std::vector<expert_work> work;
+        work.reserve((size_t) ne02);
+        for (int32_t slot = 0; slot < ne02; ++slot) {
+            const int32_t n_tokens_slot = bounds_host[(size_t) slot + 1] - bounds_host[(size_t) slot];
+            if (n_tokens_slot > 0) {
+                work.push_back(expert_work{
+                    slot,
+                    n_tokens_slot,
+                    moe_io_cuda_prefill_stream_slot_is_miss(slot),
+                });
+            }
+        }
+        std::sort(work.begin(), work.end(), [](const expert_work & a, const expert_work & b) {
+            if (a.miss != b.miss) {
+                return !a.miss;
+            }
+            if (a.n_tokens != b.n_tokens) {
+                return a.n_tokens > b.n_tokens;
+            }
+            return a.slot < b.slot;
+        });
+
+        static const size_t expert_group = []() {
+            const char * env = std::getenv("LLAMA_MOE_PREFILL_EXPERT_GROUP");
+            if (!env || env[0] == '\0') return (size_t) 8;
+            char * end = nullptr;
+            const unsigned long parsed = std::strtoul(env, &end, 10);
+            return end != env && parsed > 0 ? (size_t) parsed : (size_t) 8;
+        }();
+        for (size_t begin = 0; begin < work.size();) {
+            size_t end = begin + 1;
+            while (end < work.size() && end - begin < expert_group &&
+                    work[end].miss == work[begin].miss &&
+                    work[end].slot == work[end - 1].slot + 1) {
+                ++end;
+            }
+
+            int32_t ncols_max_group = 0;
+            for (size_t i = begin; i < end; ++i) {
+                if (work[i].miss && !moe_io_cuda_prefill_stream_wait(stream, work[i].slot)) {
+                    GGML_ABORT("MoE prefill stream failed to wait for expert slot %d", work[i].slot);
+                }
+                ncols_max_group = std::max(ncols_max_group, work[i].n_tokens);
+            }
+
+            mmq_args group_args = args;
+            group_args.x = src0_d + (size_t) work[begin].slot * nb02;
+            group_args.expert_bounds = expert_bounds.get() + work[begin].slot;
+            group_args.nchannels_x = (int64_t) (end - begin);
+            group_args.nchannels_y = (int64_t) (end - begin);
+            group_args.ncols_max = ncols_max_group;
+            ggml_cuda_mul_mat_q_switch_type(ctx, group_args, stream);
+            begin = end;
+        }
+        return;
+    }
+#endif
 
     ggml_cuda_mul_mat_q_switch_type(ctx, args, stream);
 }

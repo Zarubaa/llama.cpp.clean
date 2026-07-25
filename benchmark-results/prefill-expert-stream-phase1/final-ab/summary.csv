@@ -1,0 +1,6 @@
+tokens,disabled_ttft_ms,stream_ttft_ms,delta_ms,delta_percent,disabled_h2d_ms_per_token,stream_h2d_ms_per_token,disabled_gpu_interval_ms_per_token,stream_gpu_interval_ms_per_token,disabled_callback_ms_per_token,stream_callback_ms_per_token
+64,1360.2,1613.5,253.3,18.62,9.65,11.47,0.70,16.69,14.10,0.62
+128,1733.9,2055.2,321.3,18.53,6.62,8.10,0.53,11.60,9.75,0.41
+256,2220.3,2650.5,430.2,19.38,4.52,5.55,0.35,8.00,6.55,0.27
+512,2733.4,3164.9,431.5,15.79,2.93,3.57,0.24,4.94,4.19,0.17
+1024,3351.8,3695.5,343.7,10.25,1.90,2.06,0.19,2.95,2.64,0.10

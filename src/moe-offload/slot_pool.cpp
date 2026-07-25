@@ -159,6 +159,7 @@ slot_pool_state & state() {
 int release_completed_h2d_buffers(slot_pool_state & s);
 void wait_all_h2d_buffers(slot_pool_state & s);
 void discard_pending_profile_rows(slot_pool_state & s);
+void drain_deferred_prefill_completions(slot_pool_state & s, bool wait);
 
 uint32_t min_viable_slots(const manifest & mf) {
     const uint32_t n_experts = mf.n_experts_per_layer;
@@ -293,6 +294,22 @@ bool debug_load_trace() {
 
 bool debug_admission() {
     static const bool enabled = std::getenv("LLAMA_MOE_DEBUG_ADMISSION") != nullptr;
+    return enabled;
+}
+
+bool prefill_expert_stream_enabled() {
+    static const bool enabled = []() {
+        const char * env = std::getenv("LLAMA_MOE_PREFILL_EXPERT_STREAM");
+        return !env || env[0] == '\0' || std::strcmp(env, "0") != 0;
+    }();
+    return enabled;
+}
+
+bool dram_expert_source_enabled() {
+    static const bool enabled = []() {
+        const char * env = std::getenv("LLAMA_MOE_EXPERT_SOURCE");
+        return env && std::strcmp(env, "dram") == 0;
+    }();
     return enabled;
 }
 
@@ -1001,6 +1018,43 @@ void wait_all_h2d_buffers(slot_pool_state & s) {
     s.inflight_h2d.clear();
 }
 
+void drain_deferred_prefill_completions(slot_pool_state & s, bool wait) {
+    if (wait) {
+        while (io_outstanding() > 0) {
+            std::this_thread::yield();
+        }
+    }
+
+    auto completions = io_drain_completed();
+    for (auto & c : completions) {
+        if (!c.ok || !c.h2d_event) {
+            if (c.pinned_buf) io_release_buffer(c.pinned_buf);
+            LLAMA_LOG_ERROR("%s: deferred H2D failed L%d e%d k%d slot=%d errno=%d\n",
+                    __func__, c.layer, c.expert, c.kind, c.slot, c.io_error);
+            GGML_ABORT("MoE-offload: deferred prefill H2D failed");
+        }
+
+        io_event_sync(c.h2d_event);
+        if (c.pinned_buf) {
+            io_release_buffer(c.pinned_buf);
+        }
+
+        auto row_it = std::find_if(s.pending_rows.rbegin(), s.pending_rows.rend(),
+                [&c](const slot_pool_state::pending_profile_row & p) {
+                    return p.logical == c.layer && p.row.phase == "prefill";
+                });
+        if (row_it == s.pending_rows.rend()) {
+            LLAMA_LOG_ERROR("%s: missing profile row for deferred completion L%d e%d k%d\n",
+                    __func__, c.layer, c.expert, c.kind);
+            GGML_ABORT("MoE-offload: deferred completion lost profile ownership");
+        }
+        row_it->row.ssd_read_us += c.ssd_read_us;
+        row_it->row.ssd_bytes += c.blob_size;
+        ++row_it->row.ssd_reads;
+        row_it->h2d_events.emplace_back(c.h2d_begin_event, c.h2d_event);
+    }
+}
+
 void discard_pending_profile_rows(slot_pool_state & s) {
     for (auto & p : s.pending_rows) {
         if (p.compute_begin_event) io_event_release(p.compute_begin_event);
@@ -1281,6 +1335,10 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
     const int64_t topk_d2h_us = elapsed_us(topk_d2h_start, topk_d2h_end);
 
     const char * phase = n_tokens > 1 ? "prefill" : "decode";
+    if (prefill_expert_stream_enabled() && dram_expert_source_enabled()) {
+        drain_deferred_prefill_completions(s, false);
+    }
+    io_prefill_stream_clear();
     if (logical == 0) {
         s.current_token_idx = s.token_idx;
     }
@@ -1652,10 +1710,43 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
                 dbg_evictions, s.n_slots, s.n_active_slots);
     }
 
-    std::sort(miss_blobs.begin(), miss_blobs.end(),
-            [](const miss_blob & a, const miss_blob & b) {
-                return a.file_offset < b.file_offset;
-            });
+    const bool use_prefill_expert_stream =
+        prefill_expert_stream_enabled() && dram_expert_source_enabled() &&
+        n_tokens > 8 && misses_loaded > 1 && s.compute_backend;
+
+    if (use_prefill_expert_stream) {
+        std::vector<size_t> route_rank(mf.n_experts_per_layer, ranked.size());
+        for (size_t i = 0; i < ranked.size(); ++i) {
+            route_rank[(size_t) ranked[i].id] = i;
+        }
+        std::sort(miss_blobs.begin(), miss_blobs.end(),
+                [&route_rank](const miss_blob & a, const miss_blob & b) {
+                    if (a.kind != b.kind) return a.kind < b.kind;
+                    const size_t rank_a = route_rank[(size_t) a.expert];
+                    const size_t rank_b = route_rank[(size_t) b.expert];
+                    if (rank_a != rank_b) return rank_a < rank_b;
+                    return a.file_offset < b.file_offset;
+                });
+        for (const miss_blob & blob : miss_blobs) {
+            if (!io_prefill_stream_prepare(blob.slot, blob.kind)) {
+                GGML_ABORT("MoE-offload: failed to prepare prefill readiness slot=%d kind=%d",
+                        blob.slot, blob.kind);
+            }
+        }
+    } else {
+        std::sort(miss_blobs.begin(), miss_blobs.end(),
+                [](const miss_blob & a, const miss_blob & b) {
+                    return a.file_offset < b.file_offset;
+                });
+    }
+    if (use_prefill_expert_stream) {
+        static bool logged = false;
+        if (!logged) {
+            LLAMA_LOG_INFO("%s: prefill expert streaming enabled (hits first, misses by routed-token count)\n",
+                    __func__);
+            logged = true;
+        }
+    }
 
     auto drain_completed = [&]() -> int {
         auto completions = io_drain_completed();
@@ -1737,7 +1828,29 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
         return n;
     };
 
-    if (!miss_blobs.empty()) {
+    if (!miss_blobs.empty() && use_prefill_expert_stream) {
+        static const bool diag_no_async = std::getenv("LLAMA_MOE_DEBUG_NO_ASYNC") != nullptr;
+        GGML_ASSERT(!diag_no_async);
+        for (const miss_blob & blob : miss_blobs) {
+            void * pinned = io_acquire_buffer();
+            io_request req{};
+            req.layer       = logical;
+            req.expert      = blob.expert;
+            req.kind        = blob.kind;
+            req.slot        = blob.slot;
+            req.pinned_buf  = pinned;
+            req.blob_size   = blob.blob_size;
+            req.file_offset = blob.file_offset;
+            req.gpu_dst     = blob.gpu_dst;
+            req.h2d         = true;
+            req.prefill_stream = true;
+
+            while (!io_submit(req)) {
+                std::this_thread::yield();
+            }
+            ++submitted_misses;
+        }
+    } else if (!miss_blobs.empty()) {
         static const bool diag_no_async = std::getenv("LLAMA_MOE_DEBUG_NO_ASYNC") != nullptr;
         size_t next_miss = 0;
 
@@ -1765,6 +1878,7 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
                 req.file_offset = blob.file_offset;
                 req.gpu_dst     = blob.gpu_dst;
                 req.h2d         = !diag_no_async && (s.compute_backend != nullptr);
+                req.prefill_stream = false;
                 req.h2d_event   = nullptr;
                 req.h2d_begin_event = nullptr;
                 req.ssd_read_us = 0;
@@ -2046,10 +2160,12 @@ void slot_pool_init_io(const std::string & source_path) {
     // an entire large-ubatch layer miss set. Keep enough buffers for decode and
     // moderate prefill overlap while bounding pinned memory cost.
     constexpr int kMinIoBuffers = 32;
-    constexpr int kMaxIoBuffers = 256;
+    const bool async_dram_prefill = prefill_expert_stream_enabled() && dram_expert_source_enabled();
+    const int max_io_buffers = async_dram_prefill ? 3 * (int) active_slots_per_layer() : 256;
     int n_buffers = (int)(2 * active_slots_per_layer());
+    if (async_dram_prefill) n_buffers = 3 * (int) active_slots_per_layer();
     if (n_buffers < kMinIoBuffers) n_buffers = kMinIoBuffers;
-    if (n_buffers > kMaxIoBuffers) n_buffers = kMaxIoBuffers;
+    if (n_buffers > max_io_buffers) n_buffers = max_io_buffers;
     size_t blob_max = mf.expert_blob_size_max > 0 ? mf.expert_blob_size_max : (1024*1024);
 
     LLAMA_LOG_INFO("%s: initializing async I/O worker (n_buffers=%d, blob_max=%zu)\n",
@@ -2112,6 +2228,9 @@ void slot_pool_end_request() {
     // Ensure borrowed H2D events are complete before profile rows query and
     // release them. This can still block at request end if copies from the
     // final callback are in flight.
+    if (prefill_expert_stream_enabled() && dram_expert_source_enabled()) {
+        drain_deferred_prefill_completions(s, true);
+    }
     wait_all_h2d_buffers(s);
 
     // Phase I: drain buffered rows. Query CUDA elapsed times for compute

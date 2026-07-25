@@ -45,6 +45,7 @@ struct io_request {
 
     // Phase H: async H2D plumbing.
     bool     h2d;          // when true, worker issues io_h2d_async after fread
+    bool     prefill_stream; // worker publishes per-kind readiness for this request
     void *   h2d_event;    // opaque CUDA event handle filled by the worker on success
     // Phase I: paired begin event so the eval-callback can later query
     // cudaEventElapsedTime(begin, h2d_event) for real h2d_us.
@@ -56,7 +57,9 @@ struct io_request {
 };
 
 // One-time init.
-// - source_path: path to the .moe.gguf (opened once by the worker)
+// - source_path: path to the .moe.gguf (opened once by the worker). Set
+//   LLAMA_MOE_EXPERT_SOURCE=dram to mmap and prefault the file before serving
+//   requests; the default source is file.
 // - blob_size_max: largest expert blob in bytes (for pinned buffer sizing)
 // - n_buffers: number of pinned staging buffers in the ring pool
 bool io_init(const char * source_path, size_t blob_size_max, int n_buffers);
@@ -118,6 +121,14 @@ LLAMA_API void io_event_release(void * ev);
 // Make the given CUDA backend's compute stream wait until *ev signals.
 // Returns false if `backend` is not a CUDA backend or CUDA is unavailable.
 LLAMA_API bool io_compute_wait(ggml_backend_t backend, void * ev);
+
+// Prefill-only expert readiness registry. The callback registers each missed
+// slot's H2D events; the CUDA MMQ path consumes them immediately before it
+// launches work for that slot.
+LLAMA_API void io_prefill_stream_clear();
+LLAMA_API bool io_prefill_stream_prepare(int32_t slot, int kind);
+LLAMA_API bool io_prefill_stream_register_ready(int32_t slot, int kind, void * ev);
+LLAMA_API void io_prefill_stream_register_failed(int32_t slot, int kind);
 
 // Block the calling thread until *ev signals (test/diagnostic helper).
 // Returns false if CUDA is unavailable.

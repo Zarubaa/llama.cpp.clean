@@ -1035,6 +1035,11 @@ llama_model::llama_model(const llama_model_params & params) : params(params), pi
 }
 
 llama_model::~llama_model() {
+#ifdef LLAMA_MOE_OFFLOAD
+    if (params.moe_offload && llama_moe::runtime_enabled() && llama_moe::streaming_mode()) {
+        llama_moe::slot_pool_shutdown_io();
+    }
+#endif
     for (auto * lora : loras) {
         delete lora;
     }
