@@ -4,14 +4,17 @@
 #include "mmid.cuh"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <vector>
 
 #ifdef LLAMA_MOE_OFFLOAD
 extern "C" {
     GGML_BACKEND_API bool moe_io_cuda_prefill_stream_should_split(cudaStream_t stream);
-    GGML_BACKEND_API bool moe_io_cuda_prefill_stream_slot_is_miss(int32_t slot);
+    GGML_BACKEND_API int32_t moe_io_cuda_prefill_stream_copy_plan(
+            int32_t * slots, int32_t * n_tokens, uint8_t * misses, int32_t capacity);
     GGML_BACKEND_API bool moe_io_cuda_prefill_stream_wait(cudaStream_t stream, int32_t slot);
 }
 #endif
@@ -233,37 +236,33 @@ void ggml_cuda_mul_mat_q(
 
 #ifdef LLAMA_MOE_OFFLOAD
     if (moe_io_cuda_prefill_stream_should_split(stream)) {
-        std::vector<int32_t> bounds_host((size_t) ne02 + 1);
-        CUDA_CHECK(cudaMemcpyAsync(bounds_host.data(), expert_bounds.get(),
-                                   bounds_host.size() * sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
-        CUDA_CHECK(cudaStreamSynchronize(stream));
-
         struct expert_work {
             int32_t slot;
             int32_t n_tokens;
             bool miss;
         };
-        std::vector<expert_work> work;
-        work.reserve((size_t) ne02);
-        for (int32_t slot = 0; slot < ne02; ++slot) {
-            const int32_t n_tokens_slot = bounds_host[(size_t) slot + 1] - bounds_host[(size_t) slot];
-            if (n_tokens_slot > 0) {
-                work.push_back(expert_work{
-                    slot,
-                    n_tokens_slot,
-                    moe_io_cuda_prefill_stream_slot_is_miss(slot),
-                });
-            }
+        std::vector<int32_t> plan_slots((size_t) ne02);
+        std::vector<int32_t> plan_tokens((size_t) ne02);
+        std::vector<uint8_t> plan_misses((size_t) ne02);
+        const int32_t plan_size = moe_io_cuda_prefill_stream_copy_plan(
+                plan_slots.data(), plan_tokens.data(), plan_misses.data(), (int32_t) ne02);
+        if (plan_size <= 0) {
+            GGML_ABORT("MoE prefill stream execution plan is unavailable");
         }
-        std::sort(work.begin(), work.end(), [](const expert_work & a, const expert_work & b) {
-            if (a.miss != b.miss) {
-                return !a.miss;
+
+        std::vector<expert_work> work;
+        work.reserve((size_t) plan_size);
+        for (int32_t i = 0; i < plan_size; ++i) {
+            if (plan_slots[(size_t) i] < 0 || plan_slots[(size_t) i] >= ne02 ||
+                    plan_tokens[(size_t) i] <= 0 || plan_misses[(size_t) i] > 1) {
+                GGML_ABORT("MoE prefill stream execution plan is invalid");
             }
-            if (a.n_tokens != b.n_tokens) {
-                return a.n_tokens > b.n_tokens;
-            }
-            return a.slot < b.slot;
-        });
+            work.push_back(expert_work{
+                plan_slots[(size_t) i],
+                plan_tokens[(size_t) i],
+                plan_misses[(size_t) i] != 0,
+            });
+        }
 
         static const size_t expert_group = []() {
             const char * env = std::getenv("LLAMA_MOE_PREFILL_EXPERT_GROUP");
@@ -272,6 +271,11 @@ void ggml_cuda_mul_mat_q(
             const unsigned long parsed = std::strtoul(env, &end, 10);
             return end != env && parsed > 0 ? (size_t) parsed : (size_t) 8;
         }();
+        static const bool debug_plan = std::getenv("LLAMA_MOE_DEBUG_PREFILL_PLAN") != nullptr;
+        size_t n_groups = 0;
+        size_t n_singletons = 0;
+        size_t max_group = 0;
+        int64_t host_wait_us = 0;
         for (size_t begin = 0; begin < work.size();) {
             size_t end = begin + 1;
             while (end < work.size() && end - begin < expert_group &&
@@ -281,11 +285,18 @@ void ggml_cuda_mul_mat_q(
             }
 
             int32_t ncols_max_group = 0;
+            const auto wait_start = debug_plan ? std::chrono::steady_clock::now() :
+                                                 std::chrono::steady_clock::time_point{};
             for (size_t i = begin; i < end; ++i) {
                 if (work[i].miss && !moe_io_cuda_prefill_stream_wait(stream, work[i].slot)) {
                     GGML_ABORT("MoE prefill stream failed to wait for expert slot %d", work[i].slot);
                 }
                 ncols_max_group = std::max(ncols_max_group, work[i].n_tokens);
+            }
+            if (debug_plan) {
+                const auto wait_end = std::chrono::steady_clock::now();
+                host_wait_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                        wait_end - wait_start).count();
             }
 
             mmq_args group_args = args;
@@ -295,7 +306,23 @@ void ggml_cuda_mul_mat_q(
             group_args.nchannels_y = (int64_t) (end - begin);
             group_args.ncols_max = ncols_max_group;
             ggml_cuda_mul_mat_q_switch_type(ctx, group_args, stream);
+            if (debug_plan) {
+                const size_t group_size = end - begin;
+                ++n_groups;
+                n_singletons += group_size == 1;
+                max_group = std::max(max_group, group_size);
+            }
             begin = end;
+        }
+        static int debug_plan_logs = 0;
+        if (debug_plan && debug_plan_logs < 64) {
+            fprintf(stderr,
+                    "[moe-prefill-plan] entries=%zu groups=%zu singletons=%zu max_group=%zu "
+                    "mean_group=%.2f host_wait_us=%lld\n",
+                    work.size(), n_groups, n_singletons, max_group,
+                    n_groups > 0 ? (double) work.size() / (double) n_groups : 0.0,
+                    (long long) host_wait_us);
+            ++debug_plan_logs;
         }
         return;
     }

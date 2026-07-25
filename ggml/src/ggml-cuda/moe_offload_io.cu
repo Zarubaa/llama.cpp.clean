@@ -50,12 +50,19 @@ struct moe_io_state {
         std::condition_variable cv;
     };
 
+    struct prefill_plan_entry {
+        int32_t slot = -1;
+        int32_t n_tokens = 0;
+        uint8_t miss = 0;
+    };
+
     std::mutex                mutex;
     cudaStream_t              h2d_stream = nullptr;
     int                       stream_device = -1;
     std::vector<cudaEvent_t>  event_pool;        // free events
     size_t                    events_in_use = 0; // for diagnostics
     std::unordered_map<int64_t, std::shared_ptr<prefill_ready_state>> prefill_ready;
+    std::vector<prefill_plan_entry> prefill_plan;
     int prefill_active_kind = 0;
 
     static constexpr size_t kEventPoolHardCap = 4096;
@@ -136,7 +143,10 @@ void release_event_locked(cudaEvent_t ev) {
 extern "C" {
 
 GGML_BACKEND_API bool moe_io_cuda_prefill_stream_should_split(cudaStream_t stream);
-GGML_BACKEND_API bool moe_io_cuda_prefill_stream_slot_is_miss(int32_t slot);
+GGML_BACKEND_API bool moe_io_cuda_prefill_stream_set_plan(
+        const int32_t * slots, const int32_t * n_tokens, const uint8_t * misses, size_t count);
+GGML_BACKEND_API int32_t moe_io_cuda_prefill_stream_copy_plan(
+        int32_t * slots, int32_t * n_tokens, uint8_t * misses, int32_t capacity);
 GGML_BACKEND_API bool moe_io_cuda_prefill_stream_wait(cudaStream_t stream, int32_t slot);
 
 // Pinned host allocation (cudaHostAllocPortable). Returns nullptr on failure.
@@ -206,6 +216,7 @@ GGML_BACKEND_API bool moe_io_cuda_compute_wait(ggml_backend_t backend, void * ev
 GGML_BACKEND_API void moe_io_cuda_prefill_stream_clear() {
     std::lock_guard<std::mutex> lock(g_state.mutex);
     g_state.prefill_ready.clear();
+    g_state.prefill_plan.clear();
     g_state.prefill_active_kind = 0;
 }
 
@@ -217,6 +228,30 @@ GGML_BACKEND_API bool moe_io_cuda_prefill_stream_prepare(int32_t slot, int kind)
         return false;
     }
     g_state.prefill_ready.emplace(key, std::make_shared<moe_io_state::prefill_ready_state>());
+    return true;
+}
+
+GGML_BACKEND_API bool moe_io_cuda_prefill_stream_set_plan(
+        const int32_t * slots,
+        const int32_t * n_tokens,
+        const uint8_t * misses,
+        size_t count) {
+    if (!slots || !n_tokens || !misses || count == 0) return false;
+    std::lock_guard<std::mutex> lock(g_state.mutex);
+    if (!g_state.prefill_plan.empty()) return false;
+
+    g_state.prefill_plan.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        if (slots[i] < 0 || n_tokens[i] <= 0 || misses[i] > 1) {
+            g_state.prefill_plan.clear();
+            return false;
+        }
+        g_state.prefill_plan.push_back(moe_io_state::prefill_plan_entry{
+            slots[i],
+            n_tokens[i],
+            misses[i],
+        });
+    }
     return true;
 }
 
@@ -272,10 +307,10 @@ GGML_BACKEND_API bool moe_io_cuda_prefill_stream_should_split(cudaStream_t strea
             }
         }
         static int debug_logs = 0;
-        const bool split = kind == 0 && pending > 1;
+        const bool split = kind == 0 && pending > 1 && !g_state.prefill_plan.empty();
         if (std::getenv("LLAMA_MOE_DEBUG_PREFILL_STREAM") && debug_logs < 32) {
-            fprintf(stderr, "[moe-prefill-stream] kind=%d expected=%zu registered=%zu pending=%zu action=%s\n",
-                    kind, expected, registered, pending, split ? "split" : "batched");
+            fprintf(stderr, "[moe-prefill-stream] kind=%d expected=%zu registered=%zu pending=%zu plan=%zu action=%s\n",
+                    kind, expected, registered, pending, g_state.prefill_plan.size(), split ? "split" : "batched");
             ++debug_logs;
         }
         if (split) {
@@ -304,10 +339,21 @@ GGML_BACKEND_API bool moe_io_cuda_prefill_stream_should_split(cudaStream_t strea
     return false;
 }
 
-GGML_BACKEND_API bool moe_io_cuda_prefill_stream_slot_is_miss(int32_t slot) {
+GGML_BACKEND_API int32_t moe_io_cuda_prefill_stream_copy_plan(
+        int32_t * slots, int32_t * n_tokens, uint8_t * misses, int32_t capacity) {
+    if (!slots || !n_tokens || !misses || capacity <= 0) return -1;
     std::lock_guard<std::mutex> lock(g_state.mutex);
-    auto it = g_state.prefill_ready.find(prefill_key(slot, g_state.prefill_active_kind));
-    return it != g_state.prefill_ready.end() && !it->second->consumed;
+    if (g_state.prefill_active_kind != 0 ||
+            g_state.prefill_plan.empty() ||
+            g_state.prefill_plan.size() > (size_t) capacity) {
+        return -1;
+    }
+    for (size_t i = 0; i < g_state.prefill_plan.size(); ++i) {
+        slots[i] = g_state.prefill_plan[i].slot;
+        n_tokens[i] = g_state.prefill_plan[i].n_tokens;
+        misses[i] = g_state.prefill_plan[i].miss;
+    }
+    return (int32_t) g_state.prefill_plan.size();
 }
 
 GGML_BACKEND_API bool moe_io_cuda_prefill_stream_wait(cudaStream_t stream, int32_t slot) {

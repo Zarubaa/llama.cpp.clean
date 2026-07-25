@@ -413,6 +413,8 @@ extern "C" {
     GGML_BACKEND_API bool   moe_io_cuda_compute_wait (ggml_backend_t backend, void * ev);
     GGML_BACKEND_API void   moe_io_cuda_prefill_stream_clear(void);
     GGML_BACKEND_API bool   moe_io_cuda_prefill_stream_prepare(int32_t slot, int kind);
+    GGML_BACKEND_API bool   moe_io_cuda_prefill_stream_set_plan(
+            const int32_t * slots, const int32_t * n_tokens, const uint8_t * misses, size_t count);
     GGML_BACKEND_API bool   moe_io_cuda_prefill_stream_register_ready(int32_t slot, int kind, void * ev);
     GGML_BACKEND_API void   moe_io_cuda_prefill_stream_register_failed(int32_t slot, int kind);
     GGML_BACKEND_API bool   moe_io_cuda_event_sync   (void * ev);
@@ -436,6 +438,10 @@ bool   io_compute_wait(ggml_backend_t b, void * ev)        { return moe_io_cuda_
 void   io_prefill_stream_clear()                            { moe_io_cuda_prefill_stream_clear(); }
 bool   io_prefill_stream_prepare(int32_t slot, int kind)    {
     return moe_io_cuda_prefill_stream_prepare(slot, kind);
+}
+bool   io_prefill_stream_set_plan(
+        const int32_t * slots, const int32_t * n_tokens, const uint8_t * misses, size_t count) {
+    return moe_io_cuda_prefill_stream_set_plan(slots, n_tokens, misses, count);
 }
 bool   io_prefill_stream_register_ready(int32_t slot, int kind, void * ev) {
     return moe_io_cuda_prefill_stream_register_ready(slot, kind, ev);
@@ -462,6 +468,7 @@ void   io_event_release(void *)                            { }
 bool   io_compute_wait(ggml_backend_t, void *)             { return false; }
 void   io_prefill_stream_clear()                            { }
 bool   io_prefill_stream_prepare(int32_t, int)              { return false; }
+bool   io_prefill_stream_set_plan(const int32_t *, const int32_t *, const uint8_t *, size_t) { return false; }
 bool   io_prefill_stream_register_ready(int32_t, int, void *) { return false; }
 void   io_prefill_stream_register_failed(int32_t, int)      { }
 bool   io_event_sync  (void *)                             { return false; }

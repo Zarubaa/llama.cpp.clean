@@ -127,6 +127,11 @@ LLAMA_API bool io_compute_wait(ggml_backend_t backend, void * ev);
 // launches work for that slot.
 LLAMA_API void io_prefill_stream_clear();
 LLAMA_API bool io_prefill_stream_prepare(int32_t slot, int kind);
+LLAMA_API bool io_prefill_stream_set_plan(
+        const int32_t * slots,
+        const int32_t * n_tokens,
+        const uint8_t * misses,
+        size_t count);
 LLAMA_API bool io_prefill_stream_register_ready(int32_t slot, int kind, void * ev);
 LLAMA_API void io_prefill_stream_register_failed(int32_t slot, int kind);
 

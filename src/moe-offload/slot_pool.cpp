@@ -1715,23 +1715,68 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
         n_tokens > 8 && misses_loaded > 1 && s.compute_backend;
 
     if (use_prefill_expert_stream) {
-        std::vector<size_t> route_rank(mf.n_experts_per_layer, ranked.size());
-        for (size_t i = 0; i < ranked.size(); ++i) {
-            route_rank[(size_t) ranked[i].id] = i;
+        static const bool debug_prefill_plan =
+            std::getenv("LLAMA_MOE_DEBUG_PREFILL_PLAN") != nullptr;
+        const auto plan_start = debug_prefill_plan ? std::chrono::steady_clock::now() :
+                                                     std::chrono::steady_clock::time_point{};
+        std::unordered_set<int32_t> miss_slots;
+        miss_slots.reserve((size_t) misses_loaded);
+        for (const miss_blob & blob : miss_blobs) {
+            miss_slots.insert(blob.slot);
         }
-        std::sort(miss_blobs.begin(), miss_blobs.end(),
-                [&route_rank](const miss_blob & a, const miss_blob & b) {
-                    if (a.kind != b.kind) return a.kind < b.kind;
-                    const size_t rank_a = route_rank[(size_t) a.expert];
-                    const size_t rank_b = route_rank[(size_t) b.expert];
-                    if (rank_a != rank_b) return rank_a < rank_b;
-                    return a.file_offset < b.file_offset;
-                });
+
+        std::vector<int32_t> plan_slots;
+        std::vector<int32_t> plan_tokens;
+        std::vector<uint8_t> plan_misses;
+        plan_slots.reserve(ranked.size());
+        plan_tokens.reserve(ranked.size());
+        plan_misses.reserve(ranked.size());
+        auto append_plan_class = [&](bool want_miss) {
+            for (const routed_expert & route : ranked) {
+                const auto slot_it = call_exp2slot.find(route.id);
+                GGML_ASSERT(slot_it != call_exp2slot.end());
+                const bool is_miss = miss_slots.count(slot_it->second) != 0;
+                if (is_miss != want_miss) continue;
+                plan_slots.push_back(slot_it->second);
+                plan_tokens.push_back((int32_t) route.count);
+                plan_misses.push_back(is_miss ? 1 : 0);
+            }
+        };
+        append_plan_class(false);
+        append_plan_class(true);
+        GGML_ASSERT(plan_slots.size() == ranked.size());
+
+        // Misses were appended expert-major in routed-token order. Bucket them
+        // linearly by weight kind so all gate transfers are issued first while
+        // preserving that order within each kind.
+        std::vector<miss_blob> blobs_by_kind;
+        blobs_by_kind.reserve(miss_blobs.size());
+        for (int kind = 0; kind < EXPERT_KIND_COUNT; ++kind) {
+            for (const miss_blob & blob : miss_blobs) {
+                if (blob.kind == kind) blobs_by_kind.push_back(blob);
+            }
+        }
+        GGML_ASSERT(blobs_by_kind.size() == miss_blobs.size());
+        miss_blobs.swap(blobs_by_kind);
+
         for (const miss_blob & blob : miss_blobs) {
             if (!io_prefill_stream_prepare(blob.slot, blob.kind)) {
                 GGML_ABORT("MoE-offload: failed to prepare prefill readiness slot=%d kind=%d",
                         blob.slot, blob.kind);
             }
+        }
+        if (!io_prefill_stream_set_plan(
+                    plan_slots.data(), plan_tokens.data(), plan_misses.data(), plan_slots.size())) {
+            GGML_ABORT("MoE-offload: failed to publish prefill execution plan");
+        }
+        static int debug_plan_logs = 0;
+        if (debug_prefill_plan && debug_plan_logs < 64) {
+            const auto plan_end = std::chrono::steady_clock::now();
+            fprintf(stderr,
+                    "[moe-prefill-plan-host] L%d entries=%zu hits=%d misses=%d build_us=%lld\n",
+                    logical, plan_slots.size(), dbg_hits, misses_loaded,
+                    (long long) elapsed_us(plan_start, plan_end));
+            ++debug_plan_logs;
         }
     } else {
         std::sort(miss_blobs.begin(), miss_blobs.end(),
@@ -1742,7 +1787,7 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
     if (use_prefill_expert_stream) {
         static bool logged = false;
         if (!logged) {
-            LLAMA_LOG_INFO("%s: prefill expert streaming enabled (hits first, misses by routed-token count)\n",
+            LLAMA_LOG_INFO("%s: prefill expert streaming enabled (callback-published execution plan)\n",
                     __func__);
             logged = true;
         }
