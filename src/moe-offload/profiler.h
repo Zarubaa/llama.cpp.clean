@@ -102,6 +102,8 @@ struct profile_phase_stats {
 
 struct profile_snapshot {
     profile_phase_stats prefill;
+    profile_phase_stats prefill_target;
+    profile_phase_stats prefill_mtp_process;
     profile_phase_stats decode;
 };
 
@@ -127,6 +129,8 @@ struct profile_summary_context {
     uint64_t spec_draft_tokens = 0;
     uint64_t spec_draft_accepted = 0;
     double ttft_ms = 0.0;
+    double prefill_target_ms = 0.0;
+    double prefill_mtp_process_ms = 0.0;
     double cold_ttft_ms = 0.0;
     double warm_ttft_ms = 0.0;
     double tpot_ms = 0.0;
@@ -164,6 +168,8 @@ private:
 
     std::ofstream csv;
     profile_phase_stats prefill_stats;
+    profile_phase_stats prefill_target_stats;
+    profile_phase_stats prefill_mtp_process_stats;
     profile_phase_stats decode_stats;
 };
 

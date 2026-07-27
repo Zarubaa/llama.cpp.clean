@@ -1280,7 +1280,11 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
     const auto topk_d2h_end = std::chrono::steady_clock::now();
     const int64_t topk_d2h_us = elapsed_us(topk_d2h_start, topk_d2h_end);
 
-    const char * phase = n_tokens > 1 ? "prefill" : "decode";
+    const profile_request_row request_row = current_profile_request_row();
+    std::string phase = request_row.phase;
+    if (phase.empty() || phase == "unknown") {
+        phase = n_tokens > 1 ? "prefill" : "decode";
+    }
     if (logical == 0) {
         s.current_token_idx = s.token_idx;
     }
@@ -1909,7 +1913,6 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
         int k_req = (int) uniq.size();
         slot_pool_state::pending_profile_row p;
         p.logical = logical;
-        const profile_request_row request_row = current_profile_request_row();
         p.row.request_idx = request_row.request_idx;
         p.row.repeat_idx = request_row.repeat_idx;
         p.row.batch_idx = request_row.batch_idx;

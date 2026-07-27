@@ -33,6 +33,99 @@ double safe_div(double numerator, uint64_t denominator) {
     return denominator == 0 ? 0.0 : numerator / (double) denominator;
 }
 
+bool is_prefill_target_phase(const std::string & phase) {
+    return phase == "prefill" || phase == "prefill_target";
+}
+
+bool is_prefill_mtp_process_phase(const std::string & phase) {
+    return phase == "prefill_mtp_process";
+}
+
+void add_phase_stats(profile_phase_stats & dst, const profile_phase_stats & src) {
+    dst.rows += src.rows;
+    dst.requests += src.requests;
+    dst.required += src.required;
+    dst.hits += src.hits;
+    dst.misses += src.misses;
+    dst.ssd_bytes += src.ssd_bytes;
+    dst.ssd_reads += src.ssd_reads;
+    dst.ssd_read_us += src.ssd_read_us;
+    dst.h2d_us += src.h2d_us;
+    dst.compute_us += src.compute_us;
+    dst.stall_us += src.stall_us;
+    dst.pred_us += src.pred_us;
+    dst.pred_observe_us += src.pred_observe_us;
+    dst.pred_score_us += src.pred_score_us;
+    dst.callback_wall_us += src.callback_wall_us;
+    dst.topk_d2h_us += src.topk_d2h_us;
+    dst.slot_ids_h2d_us += src.slot_ids_h2d_us;
+    dst.slot_table_h2d_us += src.slot_table_h2d_us;
+    dst.eamc_rows_scored += src.eamc_rows_scored;
+    dst.eamc_cosine_us += src.eamc_cosine_us;
+    dst.eamc_score_materialize_us += src.eamc_score_materialize_us;
+    dst.eamc_score_cache_hits += src.eamc_score_cache_hits;
+    dst.eamc_score_cache_misses += src.eamc_score_cache_misses;
+    dst.request_wall_us += src.request_wall_us;
+    dst.request_end_us += src.request_end_us;
+    dst.predictor_end_us += src.predictor_end_us;
+    dst.predictor_save_us += src.predictor_save_us;
+    dst.profile_flush_us += src.profile_flush_us;
+    dst.sidecar_write_bytes += src.sidecar_write_bytes;
+    dst.cache_resident_peak = std::max(dst.cache_resident_peak, src.cache_resident_peak);
+    dst.routes_required += src.routes_required;
+    dst.routes_hit += src.routes_hit;
+    dst.routes_persistent += src.routes_persistent;
+    dst.k_empty_admit += src.k_empty_admit;
+    dst.k_victim_admit += src.k_victim_admit;
+    dst.k_scratch += src.k_scratch;
+    dst.route_rank_us += src.route_rank_us;
+}
+
+void add_profile_row(profile_phase_stats & stats, const profile_row & row) {
+    ++stats.rows;
+    stats.required += (uint64_t) row.k_required;
+    stats.hits += (uint64_t) row.k_hit;
+    stats.misses += (uint64_t) row.k_miss;
+    stats.ssd_bytes += row.ssd_bytes;
+    stats.ssd_reads += row.ssd_reads;
+    stats.ssd_read_us += row.ssd_read_us;
+    stats.h2d_us += row.h2d_us;
+    stats.compute_us += row.compute_us;
+    stats.stall_us += row.stall_us;
+    stats.pred_us += row.pred_us;
+    stats.pred_observe_us += row.pred_observe_us;
+    stats.pred_score_us += row.pred_score_us;
+    stats.callback_wall_us += row.callback_wall_us;
+    stats.topk_d2h_us += row.topk_d2h_us;
+    stats.slot_ids_h2d_us += row.slot_ids_h2d_us;
+    stats.slot_table_h2d_us += row.slot_table_h2d_us;
+    stats.eamc_rows_scored += row.eamc_rows_scored;
+    stats.eamc_cosine_us += row.eamc_cosine_us;
+    stats.eamc_score_materialize_us += row.eamc_score_materialize_us;
+    stats.eamc_score_cache_hits += row.eamc_score_cache_hits;
+    stats.eamc_score_cache_misses += row.eamc_score_cache_misses;
+    stats.routes_required += row.routes_required;
+    stats.routes_hit += row.routes_hit;
+    stats.routes_persistent += row.routes_persistent;
+    stats.k_empty_admit += row.k_empty_admit;
+    stats.k_victim_admit += row.k_victim_admit;
+    stats.k_scratch += row.k_scratch;
+    stats.route_rank_us += row.route_rank_us;
+    if (row.cache_resident_experts > stats.cache_resident_peak) {
+        stats.cache_resident_peak = row.cache_resident_experts;
+    }
+}
+
+void add_request_row(profile_phase_stats & stats, const profile_request_row & row) {
+    ++stats.requests;
+    stats.request_wall_us += row.request_wall_us;
+    stats.request_end_us += row.request_end_us;
+    stats.predictor_end_us += row.predictor_end_us;
+    stats.predictor_save_us += row.predictor_save_us;
+    stats.profile_flush_us += row.profile_flush_us;
+    stats.sidecar_write_bytes += row.sidecar_write_bytes;
+}
+
 void append_io_breakdown(std::ostringstream & out, const char * label, const profile_phase_stats & stats, int tokens, int repeats) {
     out << "I/O breakdown (" << label << ", mean per token):\n";
     out << "  ssd_read       " << std::setw(8) << std::setprecision(2)
@@ -124,43 +217,21 @@ void profiler::reset(const std::string & csv_path) {
         csv.close();
     }
     prefill_stats = {};
+    prefill_target_stats = {};
+    prefill_mtp_process_stats = {};
     decode_stats = {};
     open(csv_path);
 }
 
 void profiler::record(const profile_row & row) {
-    profile_phase_stats & stats = row.phase == "prefill" ? prefill_stats : decode_stats;
-    ++stats.rows;
-    stats.required += (uint64_t) row.k_required;
-    stats.hits += (uint64_t) row.k_hit;
-    stats.misses += (uint64_t) row.k_miss;
-    stats.ssd_bytes += row.ssd_bytes;
-    stats.ssd_reads += row.ssd_reads;
-    stats.ssd_read_us += row.ssd_read_us;
-    stats.h2d_us += row.h2d_us;
-    stats.compute_us += row.compute_us;
-    stats.stall_us += row.stall_us;
-    stats.pred_us += row.pred_us;
-    stats.pred_observe_us += row.pred_observe_us;
-    stats.pred_score_us += row.pred_score_us;
-    stats.callback_wall_us += row.callback_wall_us;
-    stats.topk_d2h_us += row.topk_d2h_us;
-    stats.slot_ids_h2d_us += row.slot_ids_h2d_us;
-    stats.slot_table_h2d_us += row.slot_table_h2d_us;
-    stats.eamc_rows_scored += row.eamc_rows_scored;
-    stats.eamc_cosine_us += row.eamc_cosine_us;
-    stats.eamc_score_materialize_us += row.eamc_score_materialize_us;
-    stats.eamc_score_cache_hits += row.eamc_score_cache_hits;
-    stats.eamc_score_cache_misses += row.eamc_score_cache_misses;
-    stats.routes_required += row.routes_required;
-    stats.routes_hit += row.routes_hit;
-    stats.routes_persistent += row.routes_persistent;
-    stats.k_empty_admit += row.k_empty_admit;
-    stats.k_victim_admit += row.k_victim_admit;
-    stats.k_scratch += row.k_scratch;
-    stats.route_rank_us += row.route_rank_us;
-    if (row.cache_resident_experts > stats.cache_resident_peak) {
-        stats.cache_resident_peak = row.cache_resident_experts;
+    if (is_prefill_mtp_process_phase(row.phase)) {
+        add_profile_row(prefill_mtp_process_stats, row);
+        add_profile_row(prefill_stats, row);
+    } else if (is_prefill_target_phase(row.phase)) {
+        add_profile_row(prefill_target_stats, row);
+        add_profile_row(prefill_stats, row);
+    } else {
+        add_profile_row(decode_stats, row);
     }
 
     if (csv.is_open()) {
@@ -209,14 +280,15 @@ void profiler::record(const profile_row & row) {
 }
 
 void profiler::record_request(const profile_request_row & row) {
-    profile_phase_stats & stats = row.phase == "prefill" ? prefill_stats : decode_stats;
-    ++stats.requests;
-    stats.request_wall_us += row.request_wall_us;
-    stats.request_end_us += row.request_end_us;
-    stats.predictor_end_us += row.predictor_end_us;
-    stats.predictor_save_us += row.predictor_save_us;
-    stats.profile_flush_us += row.profile_flush_us;
-    stats.sidecar_write_bytes += row.sidecar_write_bytes;
+    if (is_prefill_mtp_process_phase(row.phase)) {
+        add_request_row(prefill_mtp_process_stats, row);
+        add_request_row(prefill_stats, row);
+    } else if (is_prefill_target_phase(row.phase)) {
+        add_request_row(prefill_target_stats, row);
+        add_request_row(prefill_stats, row);
+    } else {
+        add_request_row(decode_stats, row);
+    }
 
     if (csv.is_open()) {
         csv << "request" << ','
@@ -272,6 +344,8 @@ void profiler::flush() {
 profile_snapshot profiler::snapshot() const {
     profile_snapshot snap;
     snap.prefill = prefill_stats;
+    snap.prefill_target = prefill_target_stats;
+    snap.prefill_mtp_process = prefill_mtp_process_stats;
     snap.decode = decode_stats;
     return snap;
 }
@@ -284,10 +358,16 @@ std::string profiler::summary() const {
     const double hit_rate = stats.required == 0 ? 0.0 : 100.0 * (double) stats.hits / (double) stats.required;
     out << "MoE offload summary\n";
     out << "rows: " << stats.rows << '\n';
+    out << "rows_prefill_target: " << prefill_target_stats.rows << '\n';
+    out << "rows_prefill_mtp_process: " << prefill_mtp_process_stats.rows << '\n';
+    out << "rows_decode: " << decode_stats.rows << '\n';
     out << "experts required: " << stats.required << '\n';
     out << "cache hits: " << stats.hits << '\n';
     out << "cache misses: " << stats.misses << '\n';
     out << "cache hit rate: " << std::fixed << std::setprecision(2) << hit_rate << "%\n";
+    out << "cache hit rate (prefill_target): " << hit_rate_percent(prefill_target_stats) << "%\n";
+    out << "cache hit rate (prefill_mtp_process): " << hit_rate_percent(prefill_mtp_process_stats) << "%\n";
+    out << "cache hit rate (decode): " << hit_rate_percent(decode_stats) << "%\n";
     out << "ssd_bytes: " << stats.ssd_bytes << '\n';
     out << "ssd_reads: " << stats.ssd_reads << '\n';
     out << "ssd_read_us: " << stats.ssd_read_us << '\n';
@@ -325,8 +405,19 @@ std::string profiler::summary() const {
 std::string format_summary(
         const profile_summary_context & ctx,
         const profile_snapshot & profile) {
+    const bool has_prefill_mtp_process =
+        ctx.prefill_mtp_process_ms > 0.0 || profile.prefill_mtp_process.rows > 0;
+    const double prefill_target_ms =
+        (ctx.prefill_target_ms > 0.0 || has_prefill_mtp_process) ? ctx.prefill_target_ms : ctx.ttft_ms;
+    const double prefill_mtp_process_ms = has_prefill_mtp_process ? ctx.prefill_mtp_process_ms : 0.0;
     const double prefill_tok_s = ctx.n_prompt > 0 && ctx.ttft_ms > 0.0
         ? ctx.n_prompt / (ctx.ttft_ms / 1000.0)
+        : 0.0;
+    const double prefill_target_tok_s = ctx.n_prompt > 0 && prefill_target_ms > 0.0
+        ? ctx.n_prompt / (prefill_target_ms / 1000.0)
+        : 0.0;
+    const double prefill_mtp_process_tok_s = ctx.n_prompt > 0 && prefill_mtp_process_ms > 0.0
+        ? ctx.n_prompt / (prefill_mtp_process_ms / 1000.0)
         : 0.0;
     const double decode_total_ms = ctx.tpot_ms * ctx.n_gen;
     const double decode_tok_s = ctx.tpot_ms > 0.0 ? 1000.0 / ctx.tpot_ms : 0.0;
@@ -384,23 +475,43 @@ std::string format_summary(
             << "  accept_rate=" << std::setprecision(1) << accept_rate << "%\n\n";
     }
 
-    out << "phase     tokens   total_ms   per_token_ms   tok/s\n";
-    out << "prefill   " << std::setw(6) << ctx.n_prompt
+    out << "phase                 tokens   total_ms   per_token_ms   tok/s\n";
+    out << "prefill_target        " << std::setw(6) << ctx.n_prompt
+        << "   " << std::setw(8) << std::setprecision(1) << prefill_target_ms
+        << "        " << std::setw(6) << std::setprecision(2) << (ctx.n_prompt > 0 ? prefill_target_ms / ctx.n_prompt : 0.0)
+        << "   " << std::setw(6) << std::setprecision(0) << prefill_target_tok_s << '\n';
+    if (has_prefill_mtp_process) {
+        out << "prefill_mtp_process   " << std::setw(6) << ctx.n_prompt
+            << "   " << std::setw(8) << std::setprecision(1) << prefill_mtp_process_ms
+            << "        " << std::setw(6) << std::setprecision(2) << (ctx.n_prompt > 0 ? prefill_mtp_process_ms / ctx.n_prompt : 0.0)
+            << "   " << std::setw(6) << std::setprecision(0) << prefill_mtp_process_tok_s << '\n';
+    }
+    out << "prefill_total         " << std::setw(6) << ctx.n_prompt
         << "   " << std::setw(8) << std::setprecision(1) << ctx.ttft_ms
         << "        " << std::setw(6) << std::setprecision(2) << (ctx.n_prompt > 0 ? ctx.ttft_ms / ctx.n_prompt : 0.0)
         << "   " << std::setw(6) << std::setprecision(0) << prefill_tok_s << '\n';
     out << std::fixed << std::setprecision(1);
-    out << "decode    " << std::setw(6) << ctx.n_gen
+    out << "decode                " << std::setw(6) << ctx.n_gen
         << "   " << std::setw(8) << decode_total_ms
         << "        " << std::setw(6) << std::setprecision(2) << ctx.tpot_ms
         << "   " << std::setw(6) << std::setprecision(0) << decode_tok_s << "\n\n";
 
     out << std::fixed << std::setprecision(1);
-    out << "cache hit rate (prefill): " << hit_rate_percent(profile.prefill) << "%\n";
+    out << "cache hit rate (prefill_target): " << hit_rate_percent(profile.prefill_target) << "%\n";
+    out << "cache hit rate (prefill_mtp_process): " << hit_rate_percent(profile.prefill_mtp_process) << "%\n";
+    out << "cache hit rate (prefill_total): " << hit_rate_percent(profile.prefill) << "%\n";
     out << "cache hit rate (decode): " << hit_rate_percent(profile.decode) << "%\n";
-    out << "route hit coverage (prefill): "
+    out << "route hit coverage (prefill_target): "
+        << route_coverage_percent(profile.prefill_target.routes_hit, profile.prefill_target.routes_required) << "%\n";
+    out << "route hit coverage (prefill_mtp_process): "
+        << route_coverage_percent(profile.prefill_mtp_process.routes_hit, profile.prefill_mtp_process.routes_required) << "%\n";
+    out << "route hit coverage (prefill_total): "
         << route_coverage_percent(profile.prefill.routes_hit, profile.prefill.routes_required) << "%\n";
-    out << "route persistent coverage (prefill): "
+    out << "route persistent coverage (prefill_target): "
+        << route_coverage_percent(profile.prefill_target.routes_persistent, profile.prefill_target.routes_required) << "%\n";
+    out << "route persistent coverage (prefill_mtp_process): "
+        << route_coverage_percent(profile.prefill_mtp_process.routes_persistent, profile.prefill_mtp_process.routes_required) << "%\n";
+    out << "route persistent coverage (prefill_total): "
         << route_coverage_percent(profile.prefill.routes_persistent, profile.prefill.routes_required) << "%\n";
     out << "route hit coverage (decode): "
         << route_coverage_percent(profile.decode.routes_hit, profile.decode.routes_required) << "%\n";
@@ -409,6 +520,8 @@ std::string format_summary(
     out << "SSD bytes read (decode): " << std::setprecision(2) << bytes_to_gib(profile.decode.ssd_bytes)
         << " GB  (avg " << bytes_to_mib(decode_bytes_per_token) << " MB/token)\n";
     out << "TTFT: " << std::setprecision(1) << ctx.ttft_ms << " ms\n";
+    out << "TTFT target prefill: " << std::setprecision(1) << prefill_target_ms << " ms\n";
+    out << "TTFT MTP process: " << std::setprecision(1) << prefill_mtp_process_ms << " ms\n";
     if (ctx.cold_prefill_count > 0 || ctx.warm_prefill_count > 0) {
         out << "TTFT cold: " << std::setprecision(1) << ctx.cold_ttft_ms
             << " ms  (n=" << ctx.cold_prefill_count << ")\n";
@@ -418,8 +531,14 @@ std::string format_summary(
     out << "TPOT: " << std::setprecision(2) << ctx.tpot_ms << " ms\n";
     out << "total: " << std::setprecision(1) << ctx.total_ms << " ms\n\n";
 
-    append_io_breakdown(out, "prefill", profile.prefill, ctx.n_prompt, ctx.n_repeat);
-    append_profiler_breakdown(out, "prefill", profile.prefill, ctx.n_prompt, ctx.n_repeat);
+    append_io_breakdown(out, "prefill_target", profile.prefill_target, ctx.n_prompt, ctx.n_repeat);
+    append_profiler_breakdown(out, "prefill_target", profile.prefill_target, ctx.n_prompt, ctx.n_repeat);
+    if (has_prefill_mtp_process) {
+        append_io_breakdown(out, "prefill_mtp_process", profile.prefill_mtp_process, ctx.n_prompt, ctx.n_repeat);
+        append_profiler_breakdown(out, "prefill_mtp_process", profile.prefill_mtp_process, ctx.n_prompt, ctx.n_repeat);
+    }
+    append_io_breakdown(out, "prefill_total", profile.prefill, ctx.n_prompt, ctx.n_repeat);
+    append_profiler_breakdown(out, "prefill_total", profile.prefill, ctx.n_prompt, ctx.n_repeat);
     append_io_breakdown(out, "decode", profile.decode, ctx.n_gen, ctx.n_repeat);
     append_profiler_breakdown(out, "decode", profile.decode, ctx.n_gen, ctx.n_repeat);
 
@@ -450,51 +569,17 @@ std::string format_summary(
     }
     out << "SSD reads: " << profile.decode.ssd_reads
         << " (avg " << avg_read_mib << " MB each, avg latency " << avg_read_latency_ms << " ms)\n";
-    out << "profile rows: prefill=" << profile.prefill.rows << " decode=" << profile.decode.rows << '\n';
+    out << "profile rows: prefill_target=" << profile.prefill_target.rows
+        << " prefill_mtp_process=" << profile.prefill_mtp_process.rows
+        << " prefill_total=" << profile.prefill.rows
+        << " decode=" << profile.decode.rows << '\n';
     return out.str();
 }
 
 profile_phase_stats profiler::total() const {
     profile_phase_stats stats;
-    stats.rows = prefill_stats.rows + decode_stats.rows;
-    stats.required = prefill_stats.required + decode_stats.required;
-    stats.hits = prefill_stats.hits + decode_stats.hits;
-    stats.misses = prefill_stats.misses + decode_stats.misses;
-    stats.ssd_bytes = prefill_stats.ssd_bytes + decode_stats.ssd_bytes;
-    stats.ssd_reads = prefill_stats.ssd_reads + decode_stats.ssd_reads;
-    stats.ssd_read_us = prefill_stats.ssd_read_us + decode_stats.ssd_read_us;
-    stats.h2d_us = prefill_stats.h2d_us + decode_stats.h2d_us;
-    stats.compute_us = prefill_stats.compute_us + decode_stats.compute_us;
-    stats.stall_us = prefill_stats.stall_us + decode_stats.stall_us;
-    stats.pred_us = prefill_stats.pred_us + decode_stats.pred_us;
-    stats.pred_observe_us = prefill_stats.pred_observe_us + decode_stats.pred_observe_us;
-    stats.pred_score_us = prefill_stats.pred_score_us + decode_stats.pred_score_us;
-    stats.callback_wall_us = prefill_stats.callback_wall_us + decode_stats.callback_wall_us;
-    stats.topk_d2h_us = prefill_stats.topk_d2h_us + decode_stats.topk_d2h_us;
-    stats.slot_ids_h2d_us = prefill_stats.slot_ids_h2d_us + decode_stats.slot_ids_h2d_us;
-    stats.slot_table_h2d_us = prefill_stats.slot_table_h2d_us + decode_stats.slot_table_h2d_us;
-    stats.eamc_rows_scored = prefill_stats.eamc_rows_scored + decode_stats.eamc_rows_scored;
-    stats.eamc_cosine_us = prefill_stats.eamc_cosine_us + decode_stats.eamc_cosine_us;
-    stats.eamc_score_materialize_us = prefill_stats.eamc_score_materialize_us + decode_stats.eamc_score_materialize_us;
-    stats.eamc_score_cache_hits = prefill_stats.eamc_score_cache_hits + decode_stats.eamc_score_cache_hits;
-    stats.eamc_score_cache_misses = prefill_stats.eamc_score_cache_misses + decode_stats.eamc_score_cache_misses;
-    stats.routes_required = prefill_stats.routes_required + decode_stats.routes_required;
-    stats.routes_hit = prefill_stats.routes_hit + decode_stats.routes_hit;
-    stats.routes_persistent = prefill_stats.routes_persistent + decode_stats.routes_persistent;
-    stats.k_empty_admit = prefill_stats.k_empty_admit + decode_stats.k_empty_admit;
-    stats.k_victim_admit = prefill_stats.k_victim_admit + decode_stats.k_victim_admit;
-    stats.k_scratch = prefill_stats.k_scratch + decode_stats.k_scratch;
-    stats.route_rank_us = prefill_stats.route_rank_us + decode_stats.route_rank_us;
-    stats.request_wall_us = prefill_stats.request_wall_us + decode_stats.request_wall_us;
-    stats.request_end_us = prefill_stats.request_end_us + decode_stats.request_end_us;
-    stats.predictor_end_us = prefill_stats.predictor_end_us + decode_stats.predictor_end_us;
-    stats.predictor_save_us = prefill_stats.predictor_save_us + decode_stats.predictor_save_us;
-    stats.profile_flush_us = prefill_stats.profile_flush_us + decode_stats.profile_flush_us;
-    stats.sidecar_write_bytes = prefill_stats.sidecar_write_bytes + decode_stats.sidecar_write_bytes;
-    stats.requests = prefill_stats.requests + decode_stats.requests;
-    stats.cache_resident_peak = prefill_stats.cache_resident_peak > decode_stats.cache_resident_peak
-        ? prefill_stats.cache_resident_peak
-        : decode_stats.cache_resident_peak;
+    add_phase_stats(stats, prefill_stats);
+    add_phase_stats(stats, decode_stats);
     return stats;
 }
 

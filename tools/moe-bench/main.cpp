@@ -626,11 +626,15 @@ int main(int argc, char ** argv) {
     llama_batch batch = llama_batch_init((int32_t) ctx_params.n_batch, 0, 1);
 
     std::vector<double> ttft_ms;
+    std::vector<double> prefill_target_ms;
+    std::vector<double> prefill_mtp_process_ms;
     std::vector<double> cold_ttft_ms;
     std::vector<double> warm_ttft_ms;
     std::vector<double> tpot_ms;
     std::vector<double> total_ms;
     ttft_ms.reserve((size_t) p.n_repeat);
+    prefill_target_ms.reserve((size_t) p.n_repeat);
+    prefill_mtp_process_ms.reserve((size_t) p.n_repeat);
     cold_ttft_ms.reserve((size_t) p.n_repeat);
     warm_ttft_ms.reserve((size_t) p.n_repeat);
     tpot_ms.reserve((size_t) p.n_repeat);
@@ -675,6 +679,8 @@ int main(int argc, char ** argv) {
         summary_ctx.spec_draft_tokens = spec_draft_tokens;
         summary_ctx.spec_draft_accepted = spec_draft_accepted;
         summary_ctx.ttft_ms = average_or_zero(ttft_ms);
+        summary_ctx.prefill_target_ms = average_or_zero(prefill_target_ms);
+        summary_ctx.prefill_mtp_process_ms = average_or_zero(prefill_mtp_process_ms);
         summary_ctx.cold_ttft_ms = average_or_zero(cold_ttft_ms);
         summary_ctx.warm_ttft_ms = average_or_zero(warm_ttft_ms);
         summary_ctx.tpot_ms = average_or_zero(tpot_ms);
@@ -768,12 +774,16 @@ int main(int argc, char ** argv) {
         }
 
         const double t0 = now_ms();
-        llama_moe::set_profile_request_context(rep, 0, "prefill");
+        llama_moe::set_profile_request_context(rep, 0, "prefill_target");
         fill_token_batch(batch, prompt_tokens.data(), n_prompt_tokens, 0, use_mtp);
         if (llama_decode(ctx, batch) != 0) {
             fprintf(stderr, "prefill decode failed (rep %d)\n", rep);
             exit_code = 1;
             break;
+        }
+        const double t_target = now_ms();
+        if (spec) {
+            llama_moe::set_profile_request_context(rep, 0, "prefill_mtp_process");
         }
         if (spec && !common_speculative_process(spec, batch)) {
             fprintf(stderr, "prefill speculative process failed (rep %d)\n", rep);
@@ -784,7 +794,11 @@ int main(int argc, char ** argv) {
         dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
         const double t1 = now_ms();
         const double measured_ttft_ms = t1 - t0;
+        const double measured_prefill_target_ms = t_target - t0;
+        const double measured_prefill_mtp_process_ms = spec ? t1 - t_target : 0.0;
         ttft_ms.push_back(measured_ttft_ms);
+        prefill_target_ms.push_back(measured_prefill_target_ms);
+        prefill_mtp_process_ms.push_back(measured_prefill_mtp_process_ms);
         const bool measured_prefill_warm = !p.moe_reset_cache_between_repeats && (p.moe_warm_cache || rep > 0);
         if (measured_prefill_warm) {
             warm_ttft_ms.push_back(measured_ttft_ms);
@@ -914,7 +928,7 @@ int main(int argc, char ** argv) {
 
     fprintf(stderr, "[moe-bench] computing summary...\n");
     const llama_moe::profile_snapshot profile = write_summary(true);
-    if (profile.prefill.rows + profile.decode.rows == 0) {
+    if (profile.prefill.rows + profile.prefill_target.rows + profile.prefill_mtp_process.rows + profile.decode.rows == 0) {
         fprintf(stderr, "warning: no MoE profile rows were recorded; check that the model is a repacked *.moe.gguf and that the run entered streaming mode\n");
     }
 
