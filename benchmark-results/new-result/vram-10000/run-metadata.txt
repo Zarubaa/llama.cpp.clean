@@ -1,0 +1,12 @@
+branch: 0716_eamc
+commit: 3e1fe366d290b58eabd676d6adc1694031b49d0e
+model: /workspace/models/Qwen3.6-35B-A3B-UD-Q4_K_M.moe.gguf
+prompt_file: /workspace/benchmark-results/new-result/prompts/normal-long-prompt.zh-en.txt
+prompt_bytes: 75294
+pp: 1024
+tg: 1024
+ctx: 4096
+cache_mb: 10000
+predictor: lru
+ubatches: 8 128 256 512 1024
+CUDA_VISIBLE_DEVICES: 0

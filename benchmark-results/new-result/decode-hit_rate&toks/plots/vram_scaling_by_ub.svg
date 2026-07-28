@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="560" viewBox="0 0 980 560">
+<style>
+text { font-family: Arial, Helvetica, sans-serif; fill: #1f2933; }
+.title { font-size: 20px; font-weight: 700; }
+.subtitle { font-size: 12px; fill: #52606d; }
+.axis { stroke: #52606d; stroke-width: 1; }
+.grid { stroke: #e4e7eb; stroke-width: 1; }
+.tick { font-size: 11px; fill: #52606d; }
+.label { font-size: 12px; fill: #323f4b; }
+.legend { font-size: 12px; fill: #323f4b; }
+.point-label { font-size: 10px; fill: #1f2933; }
+</style>
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text x="40" y="34" class="title">VRAM scaling by ubatch</text>
+<text x="40" y="54" class="subtitle">Lines compare the same ub while increasing the MoE cache VRAM cap.</text>
+<text x="78" y="52" class="label" font-weight="700">Decode hit rate</text>
+<line x1="78" y1="490.0" x2="468" y2="490.0" class="grid"/>
+<text x="68" y="494.0" text-anchor="end" class="tick">91.1</text>
+<line x1="78" y1="386.5" x2="468" y2="386.5" class="grid"/>
+<text x="68" y="390.5" text-anchor="end" class="tick">92.6</text>
+<line x1="78" y1="283.0" x2="468" y2="283.0" class="grid"/>
+<text x="68" y="287.0" text-anchor="end" class="tick">94.2</text>
+<line x1="78" y1="179.5" x2="468" y2="179.5" class="grid"/>
+<text x="68" y="183.5" text-anchor="end" class="tick">95.8</text>
+<line x1="78" y1="76.0" x2="468" y2="76.0" class="grid"/>
+<text x="68" y="80.0" text-anchor="end" class="tick">97.4</text>
+<line x1="78.0" y1="76" x2="78.0" y2="490" class="grid"/>
+<text x="78.0" y="512" text-anchor="middle" class="tick">6G</text>
+<line x1="273.0" y1="76" x2="273.0" y2="490" class="grid"/>
+<text x="273.0" y="512" text-anchor="middle" class="tick">8G</text>
+<line x1="468.0" y1="76" x2="468.0" y2="490" class="grid"/>
+<text x="468.0" y="512" text-anchor="middle" class="tick">10G</text>
+<line x1="78" y1="490" x2="468" y2="490" class="axis"/>
+<line x1="78" y1="490" x2="78" y2="76" class="axis"/>
+<text x="273.0" y="536" text-anchor="middle" class="label">VRAM cap</text>
+<text x="23" y="283.0" text-anchor="middle" class="label" transform="rotate(-90 23 283.0)">hit rate (%)</text>
+<polyline points="273.0,205.3 468.0,106.7" fill="none" stroke="#7f7f7f" stroke-width="2.4"/>
+<circle cx="273.0" cy="205.3" r="4.5" fill="#7f7f7f"/>
+<circle cx="468.0" cy="106.7" r="4.5" fill="#7f7f7f"/>
+<polyline points="78.0,461.6 273.0,225.0 468.0,113.2" fill="none" stroke="#4c78a8" stroke-width="2.4"/>
+<circle cx="78.0" cy="461.6" r="4.5" fill="#4c78a8"/>
+<circle cx="273.0" cy="225.0" r="4.5" fill="#4c78a8"/>
+<circle cx="468.0" cy="113.2" r="4.5" fill="#4c78a8"/>
+<polyline points="78.0,461.6 273.0,231.6 468.0,119.8" fill="none" stroke="#f58518" stroke-width="2.4"/>
+<circle cx="78.0" cy="461.6" r="4.5" fill="#f58518"/>
+<circle cx="273.0" cy="231.6" r="4.5" fill="#f58518"/>
+<circle cx="468.0" cy="119.8" r="4.5" fill="#f58518"/>
+<polyline points="78.0,455.0 273.0,225.0 468.0,113.2" fill="none" stroke="#54a24b" stroke-width="2.4"/>
+<circle cx="78.0" cy="455.0" r="4.5" fill="#54a24b"/>
+<circle cx="273.0" cy="225.0" r="4.5" fill="#54a24b"/>
+<circle cx="468.0" cy="113.2" r="4.5" fill="#54a24b"/>
+<polyline points="78.0,376.2 273.0,225.0 468.0,133.0" fill="none" stroke="#e45756" stroke-width="2.4"/>
+<circle cx="78.0" cy="376.2" r="4.5" fill="#e45756"/>
+<circle cx="273.0" cy="225.0" r="4.5" fill="#e45756"/>
+<circle cx="468.0" cy="133.0" r="4.5" fill="#e45756"/>
+<text x="558" y="52" class="label" font-weight="700">Decode throughput</text>
+<line x1="558" y1="490.0" x2="948" y2="490.0" class="grid"/>
+<text x="548" y="494.0" text-anchor="end" class="tick">31.3</text>
+<line x1="558" y1="386.5" x2="948" y2="386.5" class="grid"/>
+<text x="548" y="390.5" text-anchor="end" class="tick">38.1</text>
+<line x1="558" y1="283.0" x2="948" y2="283.0" class="grid"/>
+<text x="548" y="287.0" text-anchor="end" class="tick">44.9</text>
+<line x1="558" y1="179.5" x2="948" y2="179.5" class="grid"/>
+<text x="548" y="183.5" text-anchor="end" class="tick">51.7</text>
+<line x1="558" y1="76.0" x2="948" y2="76.0" class="grid"/>
+<text x="548" y="80.0" text-anchor="end" class="tick">58.5</text>
+<line x1="558.0" y1="76" x2="558.0" y2="490" class="grid"/>
+<text x="558.0" y="512" text-anchor="middle" class="tick">6G</text>
+<line x1="753.0" y1="76" x2="753.0" y2="490" class="grid"/>
+<text x="753.0" y="512" text-anchor="middle" class="tick">8G</text>
+<line x1="948.0" y1="76" x2="948.0" y2="490" class="grid"/>
+<text x="948.0" y="512" text-anchor="middle" class="tick">10G</text>
+<line x1="558" y1="490" x2="948" y2="490" class="axis"/>
+<line x1="558" y1="490" x2="558" y2="76" class="axis"/>
+<text x="753.0" y="536" text-anchor="middle" class="label">VRAM cap</text>
+<text x="503" y="283.0" text-anchor="middle" class="label" transform="rotate(-90 503 283.0)">tokens/s</text>
+<polyline points="753.0,132.5 948.0,108.6" fill="none" stroke="#7f7f7f" stroke-width="2.4"/>
+<circle cx="753.0" cy="132.5" r="4.5" fill="#7f7f7f"/>
+<circle cx="948.0" cy="108.6" r="4.5" fill="#7f7f7f"/>
+<polyline points="558.0,413.8 753.0,221.7 948.0,106.7" fill="none" stroke="#4c78a8" stroke-width="2.4"/>
+<circle cx="558.0" cy="413.8" r="4.5" fill="#4c78a8"/>
+<circle cx="753.0" cy="221.7" r="4.5" fill="#4c78a8"/>
+<circle cx="948.0" cy="106.7" r="4.5" fill="#4c78a8"/>
+<polyline points="558.0,383.0 753.0,151.7 948.0,156.9" fill="none" stroke="#f58518" stroke-width="2.4"/>
+<circle cx="558.0" cy="383.0" r="4.5" fill="#f58518"/>
+<circle cx="753.0" cy="151.7" r="4.5" fill="#f58518"/>
+<circle cx="948.0" cy="156.9" r="4.5" fill="#f58518"/>
+<polyline points="558.0,375.1 753.0,146.9 948.0,151.2" fill="none" stroke="#54a24b" stroke-width="2.4"/>
+<circle cx="558.0" cy="375.1" r="4.5" fill="#54a24b"/>
+<circle cx="753.0" cy="146.9" r="4.5" fill="#54a24b"/>
+<circle cx="948.0" cy="151.2" r="4.5" fill="#54a24b"/>
+<polyline points="558.0,461.6 753.0,198.0 948.0,188.3" fill="none" stroke="#e45756" stroke-width="2.4"/>
+<circle cx="558.0" cy="461.6" r="4.5" fill="#e45756"/>
+<circle cx="753.0" cy="198.0" r="4.5" fill="#e45756"/>
+<circle cx="948.0" cy="188.3" r="4.5" fill="#e45756"/>
+<text x="854" y="52" class="legend" font-weight="700">ub</text>
+<line x1="854" y1="76" x2="872" y2="76" stroke="#4c78a8" stroke-width="3"/>
+<text x="880" y="80" class="legend">128</text>
+<line x1="854" y1="100" x2="872" y2="100" stroke="#f58518" stroke-width="3"/>
+<text x="880" y="104" class="legend">256</text>
+<line x1="854" y1="124" x2="872" y2="124" stroke="#54a24b" stroke-width="3"/>
+<text x="880" y="128" class="legend">512</text>
+<line x1="854" y1="148" x2="872" y2="148" stroke="#e45756" stroke-width="3"/>
+<text x="880" y="152" class="legend">1024</text>
+<line x1="854" y1="172" x2="872" y2="172" stroke="#7f7f7f" stroke-width="3"/>
+<text x="880" y="176" class="legend">8</text>
+</svg>

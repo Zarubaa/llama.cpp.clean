@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="560" viewBox="0 0 920 560">
+<style>
+text { font-family: Arial, Helvetica, sans-serif; fill: #1f2933; }
+.title { font-size: 20px; font-weight: 700; }
+.subtitle { font-size: 12px; fill: #52606d; }
+.axis { stroke: #52606d; stroke-width: 1; }
+.grid { stroke: #e4e7eb; stroke-width: 1; }
+.tick { font-size: 11px; fill: #52606d; }
+.label { font-size: 12px; fill: #323f4b; }
+.legend { font-size: 12px; fill: #323f4b; }
+.point-label { font-size: 10px; fill: #1f2933; }
+</style>
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text x="40" y="34" class="title">Decode hit rate vs throughput</text>
+<text x="40" y="54" class="subtitle">Higher hit rate generally reduces SSD/H2D traffic and improves decode tok/s.</text>
+<line x1="82.0" y1="72" x2="82.0" y2="484" class="grid"/>
+<text x="82.0" y="506" text-anchor="middle" class="tick">91.3%</text>
+<line x1="213.6" y1="72" x2="213.6" y2="484" class="grid"/>
+<text x="213.6" y="506" text-anchor="middle" class="tick">92.5%</text>
+<line x1="345.2" y1="72" x2="345.2" y2="484" class="grid"/>
+<text x="345.2" y="506" text-anchor="middle" class="tick">93.6%</text>
+<line x1="476.8" y1="72" x2="476.8" y2="484" class="grid"/>
+<text x="476.8" y="506" text-anchor="middle" class="tick">94.8%</text>
+<line x1="608.4" y1="72" x2="608.4" y2="484" class="grid"/>
+<text x="608.4" y="506" text-anchor="middle" class="tick">95.9%</text>
+<line x1="740.0" y1="72" x2="740.0" y2="484" class="grid"/>
+<text x="740.0" y="506" text-anchor="middle" class="tick">97.1%</text>
+<line x1="82" y1="484.0" x2="740" y2="484.0" class="grid"/>
+<text x="72" y="488.0" text-anchor="end" class="tick">31</text>
+<line x1="82" y1="401.6" x2="740" y2="401.6" class="grid"/>
+<text x="72" y="405.6" text-anchor="end" class="tick">37</text>
+<line x1="82" y1="319.2" x2="740" y2="319.2" class="grid"/>
+<text x="72" y="323.2" text-anchor="end" class="tick">42</text>
+<line x1="82" y1="236.8" x2="740" y2="236.8" class="grid"/>
+<text x="72" y="240.8" text-anchor="end" class="tick">48</text>
+<line x1="82" y1="154.4" x2="740" y2="154.4" class="grid"/>
+<text x="72" y="158.4" text-anchor="end" class="tick">53</text>
+<line x1="82" y1="72.0" x2="740" y2="72.0" class="grid"/>
+<text x="72" y="76.0" text-anchor="end" class="tick">59</text>
+<line x1="82" y1="484" x2="740" y2="484" class="axis"/>
+<line x1="82" y1="484" x2="82" y2="72" class="axis"/>
+<text x="411.0" y="536" text-anchor="middle" class="label">decode cache hit rate</text>
+<text x="22" y="278.0" text-anchor="middle" class="label" transform="rotate(-90 22 278.0)">decode tokens/s</text>
+<circle cx="104.7" cy="406.4" r="6" fill="#4c78a8" stroke="#1f2933" stroke-width="0.8"/>
+<text x="112.7" y="398.4" class="point-label">ub128</text>
+<circle cx="104.7" cy="376.6" r="6" fill="#4c78a8" stroke="#1f2933" stroke-width="0.8"/>
+<text x="112.7" y="368.6" class="point-label">ub256</text>
+<circle cx="116.0" cy="368.9" r="6" fill="#4c78a8" stroke="#1f2933" stroke-width="0.8"/>
+<text x="124.0" y="360.9" class="point-label">ub512</text>
+<circle cx="252.2" cy="452.8" r="6" fill="#4c78a8" stroke="#1f2933" stroke-width="0.8"/>
+<text x="260.2" y="444.8" class="point-label">ub1024</text>
+<circle cx="547.1" cy="133.9" r="6" fill="#f58518" stroke="#1f2933" stroke-width="0.8"/>
+<text x="555.1" y="125.9" class="point-label">ub8</text>
+<circle cx="513.1" cy="220.3" r="6" fill="#f58518" stroke="#1f2933" stroke-width="0.8"/>
+<text x="521.1" y="212.3" class="point-label">ub128</text>
+<circle cx="501.8" cy="152.4" r="6" fill="#f58518" stroke="#1f2933" stroke-width="0.8"/>
+<text x="509.8" y="144.4" class="point-label">ub256</text>
+<circle cx="513.1" cy="147.8" r="6" fill="#f58518" stroke="#1f2933" stroke-width="0.8"/>
+<text x="521.1" y="139.8" class="point-label">ub512</text>
+<circle cx="513.1" cy="197.4" r="6" fill="#f58518" stroke="#1f2933" stroke-width="0.8"/>
+<text x="521.1" y="189.4" class="point-label">ub1024</text>
+<circle cx="717.3" cy="110.7" r="6" fill="#54a24b" stroke="#1f2933" stroke-width="0.8"/>
+<text x="725.3" y="102.7" class="point-label">ub8</text>
+<circle cx="706.0" cy="108.8" r="6" fill="#54a24b" stroke="#1f2933" stroke-width="0.8"/>
+<text x="714.0" y="100.8" class="point-label">ub128</text>
+<circle cx="694.6" cy="157.5" r="6" fill="#54a24b" stroke="#1f2933" stroke-width="0.8"/>
+<text x="702.6" y="149.5" class="point-label">ub256</text>
+<circle cx="706.0" cy="152.0" r="6" fill="#54a24b" stroke="#1f2933" stroke-width="0.8"/>
+<text x="714.0" y="144.0" class="point-label">ub512</text>
+<circle cx="671.9" cy="187.9" r="6" fill="#54a24b" stroke="#1f2933" stroke-width="0.8"/>
+<text x="679.9" y="179.9" class="point-label">ub1024</text>
+<text x="774" y="80" class="legend" font-weight="700">VRAM cap</text>
+<rect x="774" y="94" width="14" height="14" fill="#4c78a8"/>
+<text x="796" y="105" class="legend">6000 MB</text>
+<rect x="774" y="118" width="14" height="14" fill="#f58518"/>
+<text x="796" y="129" class="legend">8000 MB</text>
+<rect x="774" y="142" width="14" height="14" fill="#54a24b"/>
+<text x="796" y="153" class="legend">10000 MB</text>
+</svg>

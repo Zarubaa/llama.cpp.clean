@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="430" viewBox="0 0 760 430">
+<style>
+text { font-family: Arial, Helvetica, sans-serif; fill: #1f2933; }
+.title { font-size: 20px; font-weight: 700; }
+.subtitle { font-size: 12px; fill: #52606d; }
+.axis { stroke: #52606d; stroke-width: 1; }
+.grid { stroke: #e4e7eb; stroke-width: 1; }
+.tick { font-size: 11px; fill: #52606d; }
+.label { font-size: 12px; fill: #323f4b; }
+.legend { font-size: 12px; fill: #323f4b; }
+.point-label { font-size: 10px; fill: #1f2933; }
+</style>
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text x="40" y="34" class="title">Decode throughput heatmap</text>
+<text x="40" y="54" class="subtitle">Cell value is calculated decode tokens/s.</text>
+<text x="176.0" y="70" text-anchor="middle" class="label">ub8</text>
+<text x="288.0" y="70" text-anchor="middle" class="label">ub128</text>
+<text x="400.0" y="70" text-anchor="middle" class="label">ub256</text>
+<text x="512.0" y="70" text-anchor="middle" class="label">ub512</text>
+<text x="624.0" y="70" text-anchor="middle" class="label">ub1024</text>
+<text x="102" y="128.0" text-anchor="end" class="label">6G</text>
+<rect x="120" y="90" width="109" height="63" rx="3" fill="#f3f4f6" stroke="#d9e2ec"/>
+<text x="176.0" y="121.0" text-anchor="middle" class="label" font-weight="700">N/A</text>
+<rect x="232" y="90" width="109" height="63" rx="3" fill="#d1e8ea" stroke="#d9e2ec"/>
+<text x="288.0" y="121.0" text-anchor="middle" class="label" font-weight="700">36.3</text>
+<text x="288.0" y="139.0" text-anchor="middle" class="tick">hit 91.5%</text>
+<rect x="344" y="90" width="109" height="63" rx="3" fill="#c4e2dd" stroke="#d9e2ec"/>
+<text x="400.0" y="121.0" text-anchor="middle" class="label" font-weight="700">38.3</text>
+<text x="400.0" y="139.0" text-anchor="middle" class="tick">hit 91.5%</text>
+<rect x="456" y="90" width="109" height="63" rx="3" fill="#c1e0da" stroke="#d9e2ec"/>
+<text x="512.0" y="121.0" text-anchor="middle" class="label" font-weight="700">38.8</text>
+<text x="512.0" y="139.0" text-anchor="middle" class="tick">hit 91.6%</text>
+<rect x="568" y="90" width="109" height="63" rx="3" fill="#e6f2ff" stroke="#d9e2ec"/>
+<text x="624.0" y="121.0" text-anchor="middle" class="label" font-weight="700">33.1</text>
+<text x="624.0" y="139.0" text-anchor="middle" class="tick">hit 92.8%</text>
+<text x="102" y="194.0" text-anchor="end" class="label">8G</text>
+<rect x="120" y="156" width="109" height="63" rx="3" fill="#5ab173" stroke="#d9e2ec"/>
+<text x="176.0" y="187.0" text-anchor="middle" class="label" font-weight="700">54.8</text>
+<text x="176.0" y="205.0" text-anchor="middle" class="tick">hit 95.4%</text>
+<rect x="232" y="156" width="109" height="63" rx="3" fill="#80c299" stroke="#d9e2ec"/>
+<text x="288.0" y="187.0" text-anchor="middle" class="label" font-weight="700">48.9</text>
+<text x="288.0" y="205.0" text-anchor="middle" class="tick">hit 95.1%</text>
+<rect x="344" y="156" width="109" height="63" rx="3" fill="#63b47c" stroke="#d9e2ec"/>
+<text x="400.0" y="187.0" text-anchor="middle" class="label" font-weight="700">53.5</text>
+<text x="400.0" y="205.0" text-anchor="middle" class="tick">hit 95.0%</text>
+<rect x="456" y="156" width="109" height="63" rx="3" fill="#60b379" stroke="#d9e2ec"/>
+<text x="512.0" y="187.0" text-anchor="middle" class="label" font-weight="700">53.9</text>
+<text x="512.0" y="205.0" text-anchor="middle" class="tick">hit 95.1%</text>
+<rect x="568" y="156" width="109" height="63" rx="3" fill="#76be8f" stroke="#d9e2ec"/>
+<text x="624.0" y="187.0" text-anchor="middle" class="label" font-weight="700">50.5</text>
+<text x="624.0" y="205.0" text-anchor="middle" class="tick">hit 95.1%</text>
+<text x="102" y="260.0" text-anchor="end" class="label">10G</text>
+<rect x="120" y="222" width="109" height="63" rx="3" fill="#50ac69" stroke="#d9e2ec"/>
+<text x="176.0" y="253.0" text-anchor="middle" class="label" font-weight="700">56.4</text>
+<text x="176.0" y="271.0" text-anchor="middle" class="tick">hit 96.9%</text>
+<rect x="232" y="222" width="109" height="63" rx="3" fill="#50ac69" stroke="#d9e2ec"/>
+<text x="288.0" y="253.0" text-anchor="middle" class="label" font-weight="700">56.5</text>
+<text x="288.0" y="271.0" text-anchor="middle" class="tick">hit 96.8%</text>
+<rect x="344" y="222" width="109" height="63" rx="3" fill="#65b57e" stroke="#d9e2ec"/>
+<text x="400.0" y="253.0" text-anchor="middle" class="label" font-weight="700">53.2</text>
+<text x="400.0" y="271.0" text-anchor="middle" class="tick">hit 96.7%</text>
+<rect x="456" y="222" width="109" height="63" rx="3" fill="#62b47b" stroke="#d9e2ec"/>
+<text x="512.0" y="253.0" text-anchor="middle" class="label" font-weight="700">53.6</text>
+<text x="512.0" y="271.0" text-anchor="middle" class="tick">hit 96.8%</text>
+<rect x="568" y="222" width="109" height="63" rx="3" fill="#72bc8b" stroke="#d9e2ec"/>
+<text x="624.0" y="253.0" text-anchor="middle" class="label" font-weight="700">51.1</text>
+<text x="624.0" y="271.0" text-anchor="middle" class="tick">hit 96.5%</text>
+<text x="400.0" y="392" text-anchor="middle" class="label">decode tokens/s by VRAM cap and ubatch</text>
+</svg>
