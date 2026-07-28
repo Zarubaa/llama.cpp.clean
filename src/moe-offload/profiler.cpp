@@ -29,6 +29,11 @@ double us_per_token_ms(int64_t usec, int tokens, int repeats) {
     return (double) usec / 1000.0 / (double) denom;
 }
 
+double request_wall_total_ms(const profile_phase_stats & stats, int repeats) {
+    const int denom = std::max(1, repeats);
+    return (double) stats.request_wall_us / 1000.0 / (double) denom;
+}
+
 double safe_div(double numerator, uint64_t denominator) {
     return denominator == 0 ? 0.0 : numerator / (double) denominator;
 }
@@ -39,6 +44,18 @@ bool is_prefill_target_phase(const std::string & phase) {
 
 bool is_prefill_mtp_process_phase(const std::string & phase) {
     return phase == "prefill_mtp_process";
+}
+
+bool is_decode_mtp_draft_phase(const std::string & phase) {
+    return phase == "decode_mtp_draft";
+}
+
+bool is_decode_mtp_process_phase(const std::string & phase) {
+    return phase == "decode_mtp_process";
+}
+
+bool has_phase_activity(const profile_phase_stats & stats) {
+    return stats.rows > 0 || stats.requests > 0;
 }
 
 void add_phase_stats(profile_phase_stats & dst, const profile_phase_stats & src) {
@@ -220,6 +237,9 @@ void profiler::reset(const std::string & csv_path) {
     prefill_target_stats = {};
     prefill_mtp_process_stats = {};
     decode_stats = {};
+    decode_target_stats = {};
+    decode_mtp_draft_stats = {};
+    decode_mtp_process_stats = {};
     open(csv_path);
 }
 
@@ -232,6 +252,15 @@ void profiler::record(const profile_row & row) {
         add_profile_row(prefill_stats, row);
     } else {
         add_profile_row(decode_stats, row);
+        if (is_decode_mtp_draft_phase(row.phase)) {
+            add_profile_row(decode_mtp_draft_stats, row);
+        } else if (is_decode_mtp_process_phase(row.phase)) {
+            add_profile_row(decode_mtp_process_stats, row);
+        } else {
+            // Treat legacy "decode" and unknown decode-like phases as target
+            // model work, so older benchmark CSVs remain interpretable.
+            add_profile_row(decode_target_stats, row);
+        }
     }
 
     if (csv.is_open()) {
@@ -288,6 +317,13 @@ void profiler::record_request(const profile_request_row & row) {
         add_request_row(prefill_stats, row);
     } else {
         add_request_row(decode_stats, row);
+        if (is_decode_mtp_draft_phase(row.phase)) {
+            add_request_row(decode_mtp_draft_stats, row);
+        } else if (is_decode_mtp_process_phase(row.phase)) {
+            add_request_row(decode_mtp_process_stats, row);
+        } else {
+            add_request_row(decode_target_stats, row);
+        }
     }
 
     if (csv.is_open()) {
@@ -347,6 +383,9 @@ profile_snapshot profiler::snapshot() const {
     snap.prefill_target = prefill_target_stats;
     snap.prefill_mtp_process = prefill_mtp_process_stats;
     snap.decode = decode_stats;
+    snap.decode_target = decode_target_stats;
+    snap.decode_mtp_draft = decode_mtp_draft_stats;
+    snap.decode_mtp_process = decode_mtp_process_stats;
     return snap;
 }
 
@@ -361,6 +400,9 @@ std::string profiler::summary() const {
     out << "rows_prefill_target: " << prefill_target_stats.rows << '\n';
     out << "rows_prefill_mtp_process: " << prefill_mtp_process_stats.rows << '\n';
     out << "rows_decode: " << decode_stats.rows << '\n';
+    out << "rows_decode_target: " << decode_target_stats.rows << '\n';
+    out << "rows_decode_mtp_draft: " << decode_mtp_draft_stats.rows << '\n';
+    out << "rows_decode_mtp_process: " << decode_mtp_process_stats.rows << '\n';
     out << "experts required: " << stats.required << '\n';
     out << "cache hits: " << stats.hits << '\n';
     out << "cache misses: " << stats.misses << '\n';
@@ -368,6 +410,9 @@ std::string profiler::summary() const {
     out << "cache hit rate (prefill_target): " << hit_rate_percent(prefill_target_stats) << "%\n";
     out << "cache hit rate (prefill_mtp_process): " << hit_rate_percent(prefill_mtp_process_stats) << "%\n";
     out << "cache hit rate (decode): " << hit_rate_percent(decode_stats) << "%\n";
+    out << "cache hit rate (decode_target): " << hit_rate_percent(decode_target_stats) << "%\n";
+    out << "cache hit rate (decode_mtp_draft): " << hit_rate_percent(decode_mtp_draft_stats) << "%\n";
+    out << "cache hit rate (decode_mtp_process): " << hit_rate_percent(decode_mtp_process_stats) << "%\n";
     out << "ssd_bytes: " << stats.ssd_bytes << '\n';
     out << "ssd_reads: " << stats.ssd_reads << '\n';
     out << "ssd_read_us: " << stats.ssd_read_us << '\n';
@@ -496,11 +541,41 @@ std::string format_summary(
         << "        " << std::setw(6) << std::setprecision(2) << ctx.tpot_ms
         << "   " << std::setw(6) << std::setprecision(0) << decode_tok_s << "\n\n";
 
+    if (has_phase_activity(profile.decode_target) ||
+            has_phase_activity(profile.decode_mtp_draft) ||
+            has_phase_activity(profile.decode_mtp_process)) {
+        out << std::fixed << std::setprecision(1);
+        out << "decode profiler split, mean wall over repeats:\n";
+        out << "  target_verify        " << std::setw(8)
+            << request_wall_total_ms(profile.decode_target, ctx.n_repeat) << " ms"
+            << "  rows=" << profile.decode_target.rows
+            << "  requests=" << profile.decode_target.requests
+            << "  hit=" << hit_rate_percent(profile.decode_target) << "%\n";
+        if (has_phase_activity(profile.decode_mtp_draft)) {
+            out << "  mtp_draft            " << std::setw(8)
+                << request_wall_total_ms(profile.decode_mtp_draft, ctx.n_repeat) << " ms"
+                << "  rows=" << profile.decode_mtp_draft.rows
+                << "  requests=" << profile.decode_mtp_draft.requests
+                << "  hit=" << hit_rate_percent(profile.decode_mtp_draft) << "%\n";
+        }
+        if (has_phase_activity(profile.decode_mtp_process)) {
+            out << "  mtp_process          " << std::setw(8)
+                << request_wall_total_ms(profile.decode_mtp_process, ctx.n_repeat) << " ms"
+                << "  rows=" << profile.decode_mtp_process.rows
+                << "  requests=" << profile.decode_mtp_process.requests
+                << "  hit=" << hit_rate_percent(profile.decode_mtp_process) << "%\n";
+        }
+        out << '\n';
+    }
+
     out << std::fixed << std::setprecision(1);
     out << "cache hit rate (prefill_target): " << hit_rate_percent(profile.prefill_target) << "%\n";
     out << "cache hit rate (prefill_mtp_process): " << hit_rate_percent(profile.prefill_mtp_process) << "%\n";
     out << "cache hit rate (prefill_total): " << hit_rate_percent(profile.prefill) << "%\n";
     out << "cache hit rate (decode): " << hit_rate_percent(profile.decode) << "%\n";
+    out << "cache hit rate (decode_target): " << hit_rate_percent(profile.decode_target) << "%\n";
+    out << "cache hit rate (decode_mtp_draft): " << hit_rate_percent(profile.decode_mtp_draft) << "%\n";
+    out << "cache hit rate (decode_mtp_process): " << hit_rate_percent(profile.decode_mtp_process) << "%\n";
     out << "route hit coverage (prefill_target): "
         << route_coverage_percent(profile.prefill_target.routes_hit, profile.prefill_target.routes_required) << "%\n";
     out << "route hit coverage (prefill_mtp_process): "
@@ -515,8 +590,20 @@ std::string format_summary(
         << route_coverage_percent(profile.prefill.routes_persistent, profile.prefill.routes_required) << "%\n";
     out << "route hit coverage (decode): "
         << route_coverage_percent(profile.decode.routes_hit, profile.decode.routes_required) << "%\n";
+    out << "route hit coverage (decode_target): "
+        << route_coverage_percent(profile.decode_target.routes_hit, profile.decode_target.routes_required) << "%\n";
+    out << "route hit coverage (decode_mtp_draft): "
+        << route_coverage_percent(profile.decode_mtp_draft.routes_hit, profile.decode_mtp_draft.routes_required) << "%\n";
+    out << "route hit coverage (decode_mtp_process): "
+        << route_coverage_percent(profile.decode_mtp_process.routes_hit, profile.decode_mtp_process.routes_required) << "%\n";
     out << "route persistent coverage (decode): "
         << route_coverage_percent(profile.decode.routes_persistent, profile.decode.routes_required) << "%\n";
+    out << "route persistent coverage (decode_target): "
+        << route_coverage_percent(profile.decode_target.routes_persistent, profile.decode_target.routes_required) << "%\n";
+    out << "route persistent coverage (decode_mtp_draft): "
+        << route_coverage_percent(profile.decode_mtp_draft.routes_persistent, profile.decode_mtp_draft.routes_required) << "%\n";
+    out << "route persistent coverage (decode_mtp_process): "
+        << route_coverage_percent(profile.decode_mtp_process.routes_persistent, profile.decode_mtp_process.routes_required) << "%\n";
     out << "SSD bytes read (decode): " << std::setprecision(2) << bytes_to_gib(profile.decode.ssd_bytes)
         << " GB  (avg " << bytes_to_mib(decode_bytes_per_token) << " MB/token)\n";
     out << "TTFT: " << std::setprecision(1) << ctx.ttft_ms << " ms\n";
@@ -541,6 +628,16 @@ std::string format_summary(
     append_profiler_breakdown(out, "prefill_total", profile.prefill, ctx.n_prompt, ctx.n_repeat);
     append_io_breakdown(out, "decode", profile.decode, ctx.n_gen, ctx.n_repeat);
     append_profiler_breakdown(out, "decode", profile.decode, ctx.n_gen, ctx.n_repeat);
+    append_io_breakdown(out, "decode_target", profile.decode_target, ctx.n_gen, ctx.n_repeat);
+    append_profiler_breakdown(out, "decode_target", profile.decode_target, ctx.n_gen, ctx.n_repeat);
+    if (has_phase_activity(profile.decode_mtp_draft)) {
+        append_io_breakdown(out, "decode_mtp_draft", profile.decode_mtp_draft, ctx.n_gen, ctx.n_repeat);
+        append_profiler_breakdown(out, "decode_mtp_draft", profile.decode_mtp_draft, ctx.n_gen, ctx.n_repeat);
+    }
+    if (has_phase_activity(profile.decode_mtp_process)) {
+        append_io_breakdown(out, "decode_mtp_process", profile.decode_mtp_process, ctx.n_gen, ctx.n_repeat);
+        append_profiler_breakdown(out, "decode_mtp_process", profile.decode_mtp_process, ctx.n_gen, ctx.n_repeat);
+    }
 
     out << "Wall/profile reconciliation (decode):\n";
     out << "  wall_decode_us        " << wall_decode_us << '\n';
@@ -572,7 +669,17 @@ std::string format_summary(
     out << "profile rows: prefill_target=" << profile.prefill_target.rows
         << " prefill_mtp_process=" << profile.prefill_mtp_process.rows
         << " prefill_total=" << profile.prefill.rows
-        << " decode=" << profile.decode.rows << '\n';
+        << " decode=" << profile.decode.rows
+        << " decode_target=" << profile.decode_target.rows
+        << " decode_mtp_draft=" << profile.decode_mtp_draft.rows
+        << " decode_mtp_process=" << profile.decode_mtp_process.rows << '\n';
+    out << "profile requests: prefill_target=" << profile.prefill_target.requests
+        << " prefill_mtp_process=" << profile.prefill_mtp_process.requests
+        << " prefill_total=" << profile.prefill.requests
+        << " decode=" << profile.decode.requests
+        << " decode_target=" << profile.decode_target.requests
+        << " decode_mtp_draft=" << profile.decode_mtp_draft.requests
+        << " decode_mtp_process=" << profile.decode_mtp_process.requests << '\n';
     return out.str();
 }
 

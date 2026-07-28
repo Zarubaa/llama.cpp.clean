@@ -93,17 +93,28 @@ bool prefetch_all_experts();
 // In streaming mode it also registers a [n_expert_used, n_tokens] I32 tensor
 // that the callback fills directly with slot indices for downstream
 // MUL_MAT_ID. In full-residency mode the original expert IDs are used.
-void register_slot_table_for_topk(int logical_layer, ggml_tensor * topk, ggml_tensor * slot_table);
-void register_slot_ids_for_topk(int logical_layer, ggml_tensor * topk, ggml_tensor * slot_ids);
-void register_weights_for_topk(int logical_layer, ggml_tensor * topk, ggml_tensor * weights);
+void register_slot_table_for_topk(
+        const void * graph_owner,
+        int logical_layer,
+        ggml_tensor * topk,
+        ggml_tensor * slot_table);
+void register_slot_ids_for_topk(
+        const void * graph_owner,
+        int logical_layer,
+        ggml_tensor * topk,
+        ggml_tensor * slot_ids);
+void register_weights_for_topk(
+        const void * graph_owner,
+        int logical_layer,
+        ggml_tensor * topk,
+        ggml_tensor * weights);
 void populate_slot_tables_identity();
 
-// Clear per-graph-build slot_table bookkeeping (topk->slot_table maps and the
-// flat list of registered slot_tables). Called by llama-context.cpp immediately
-// before rebuilding a compute graph so that only the new graph's tensor
-// pointers are visible. The persistent slot_tensors registry (model weights)
-// and the per-layer LRU cache are NOT touched.
-void reset_graph_state();
+// Clear one context's per-graph bookkeeping. MTP uses separate target and
+// draft contexts whose graphs can remain live at the same time, so clearing
+// another context's tensor mappings would bypass its streaming callback.
+// Persistent slot tensors and the shared per-layer LRU cache are not touched.
+void reset_graph_state(const void * graph_owner);
 
 // Phase D-2: streaming mode (n_slots < n_experts). When true, the loader does
 // NOT prefetch all experts; instead a per-layer LRU cache fills slots on demand
@@ -117,11 +128,10 @@ void slot_pool_init_io(const std::string & source_path);
 // Phase D-5: shutdown the async I/O worker.
 void slot_pool_shutdown_io();
 
-// Phase H: tell the slot pool which CUDA backend owns the compute stream
-// so the eval-callback can stall it on async H2D events via
-// cudaStreamWaitEvent. Pass nullptr to disable async H2D (callback falls
-// back to synchronous ggml_backend_tensor_set).
-void slot_pool_set_compute_backend(ggml_backend_t backend);
+// Associate one reusable graph with the backend that owns its compute stream,
+// so async H2D waits and timing events are recorded on the correct context.
+// Pass a null backend to use synchronous H2D for that graph.
+void slot_pool_set_compute_backend(const void * graph_owner, ggml_backend_t backend);
 
 // Reset per-request predictor observations before an internal decode batch.
 void slot_pool_begin_request();

@@ -5,6 +5,10 @@
 #include "llama-model.h"
 #include "llama-context.h"
 
+#ifdef LLAMA_MOE_OFFLOAD
+#include "moe-offload/slot_pool.h"
+#endif
+
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -863,6 +867,9 @@ bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_co
 
             auto * res = lctx->get_gf_res_reserve();
 
+#ifdef LLAMA_MOE_OFFLOAD
+            llama_moe::reset_graph_state(res);
+#endif
             res->reset();
 
             auto * gf = build_graph_shift(res, lctx);

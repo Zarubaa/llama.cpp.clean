@@ -48,6 +48,7 @@ LLAMA_API void reset_profile();
 ggml_tensor * remap_selected_experts(
         ggml_context * ctx,
         ggml_tensor * selected_experts,
+        const void * graph_owner,
         int layer,
         int64_t n_expert,
         int64_t n_expert_used);

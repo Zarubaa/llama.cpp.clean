@@ -48,6 +48,7 @@ struct bench_params {
     std::string moe_eamc_path;
     std::string moe_profile_csv;
     std::string moe_profile_summary;
+    std::string token_trace_path;
     int n_gpu_layers = 99;
     int n_ctx = 4096;
     int n_ubatch = 0;
@@ -134,6 +135,8 @@ static bool parse_args(int argc, char ** argv, bench_params & p) {
         else if (value_for("--moe-eamc-path", p.moe_eamc_path)) {}
         else if (value_for("--moe-profile-csv", p.moe_profile_csv)) {}
         else if (value_for("--moe-profile-summary", p.moe_profile_summary)) {}
+        else if (value_for("--token-trace", p.token_trace_path)) {}
+        else if (value_for("--output-token-trace", p.token_trace_path)) {}
         else if (layers_for("-ngl", p.n_gpu_layers)) {}
         else if (layers_for("--gpu-layers", p.n_gpu_layers)) {}
         else if (layers_for("--n-gpu-layers", p.n_gpu_layers)) {}
@@ -420,6 +423,17 @@ static llama_token greedy_token_ith(llama_context * ctx, int vocab_size, int32_t
     return token;
 }
 
+static std::string join_tokens_for_csv(const std::vector<llama_token> & tokens) {
+    std::ostringstream out;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (i > 0) {
+            out << ' ';
+        }
+        out << tokens[i];
+    }
+    return out.str();
+}
+
 static void fill_token_batch(
         llama_batch & batch,
         const llama_token * tokens,
@@ -446,7 +460,7 @@ static void safe_context_seq_rm_tail(llama_context * ctx, llama_seq_id seq_id, l
 int main(int argc, char ** argv) {
     bench_params p;
     if (!parse_args(argc, argv, p)) {
-        fprintf(stderr, "Usage: llama-moe-bench --model <path> --pp N --tg N [--repeat N] [--moe-cache-vram-mb MB] [--moe-predictor lru|eamc] [--moe-eamc-path PATH] [--moe-profile-csv PATH] [--moe-profile-summary PATH] [--moe-reset-cache-between-repeats] [--moe-warm-cache] [--moe-hot-start] [-ub N] [--spec-type draft-mtp] [--spec-draft-n-max N] [--spec-draft-n-min N] [--spec-draft-p-min P] [--spec-draft-type-k TYPE] [--spec-draft-type-v TYPE]\n");
+        fprintf(stderr, "Usage: llama-moe-bench --model <path> --pp N --tg N [--repeat N] [--moe-cache-vram-mb MB] [--moe-predictor lru|eamc] [--moe-eamc-path PATH] [--moe-profile-csv PATH] [--moe-profile-summary PATH] [--token-trace PATH] [--moe-reset-cache-between-repeats] [--moe-warm-cache] [--moe-hot-start] [-ub N] [--spec-type draft-mtp] [--spec-draft-n-max N] [--spec-draft-n-min N] [--spec-draft-p-min P] [--spec-draft-type-k TYPE] [--spec-draft-type-v TYPE]\n");
         return 1;
     }
     const bool use_mtp = p.spec_type == "draft-mtp";
@@ -454,6 +468,42 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "unsupported --spec-type '%s' (currently supported: none, draft-mtp)\n", p.spec_type.c_str());
         return 1;
     }
+
+    std::ofstream token_trace;
+    if (!p.token_trace_path.empty()) {
+        token_trace.open(p.token_trace_path, std::ios::out | std::ios::trunc);
+        if (!token_trace) {
+            fprintf(stderr, "[moe-bench] ERROR: failed to open token trace file: %s\n", p.token_trace_path.c_str());
+            return 1;
+        }
+        token_trace << "repeat,iteration,phase,generated_before,n_past,token_in,emitted_tokens,draft_tokens,draft_accepted,next_token,generated_after\n";
+    }
+    auto write_token_trace = [&](int repeat_idx,
+            int iteration,
+            const char * phase,
+            int generated_before,
+            int n_past,
+            llama_token token_in,
+            const std::vector<llama_token> & emitted_tokens,
+            const std::vector<llama_token> & draft_tokens,
+            int n_draft_accepted,
+            llama_token next_token,
+            int generated_after) {
+        if (!token_trace.is_open()) {
+            return;
+        }
+        token_trace << repeat_idx << ','
+            << iteration << ','
+            << phase << ','
+            << generated_before << ','
+            << n_past << ','
+            << token_in << ','
+            << '"' << join_tokens_for_csv(emitted_tokens) << '"' << ','
+            << '"' << join_tokens_for_csv(draft_tokens) << '"' << ','
+            << n_draft_accepted << ','
+            << next_token << ','
+            << generated_after << '\n';
+    };
 
     std::string prompt_text = p.prompt;
     if (prompt_text.empty()) {
@@ -537,6 +587,9 @@ int main(int argc, char ** argv) {
         llama_context_params ctx_params_dft = ctx_params;
         ctx_params_dft.ctx_type  = LLAMA_CONTEXT_TYPE_MTP;
         ctx_params_dft.ctx_other = ctx;
+        // Match the server/common speculative setup: rollback snapshots are
+        // required by the hybrid target context, not by the MTP-only context.
+        ctx_params_dft.n_rs_seq  = 0;
         ctx_params_dft.type_k    = p.spec_draft_type_k;
         ctx_params_dft.type_v    = p.spec_draft_type_v;
 
@@ -731,6 +784,7 @@ int main(int argc, char ** argv) {
         fill_token_batch(batch, prompt_tokens.data(), n_prompt_tokens, 0, use_mtp);
         if (llama_decode(ctx, batch) != 0) {
             fprintf(stderr, "warm-cache prefill decode failed\n");
+            llama_moe::slot_pool_shutdown_io();
             llama_batch_free(batch);
             if (spec) {
                 common_speculative_free(spec);
@@ -745,6 +799,7 @@ int main(int argc, char ** argv) {
         }
         if (spec && !common_speculative_process(spec, batch)) {
             fprintf(stderr, "warm-cache speculative process failed\n");
+            llama_moe::slot_pool_shutdown_io();
             llama_batch_free(batch);
             common_speculative_free(spec);
             if (ctx_dft) {
@@ -807,7 +862,7 @@ int main(int argc, char ** argv) {
         }
         write_summary(false);
 
-        llama_token token = greedy_token_ith(ctx, vocab_size, use_mtp ? n_prompt_tokens - 1 : 0);
+        llama_token token = greedy_token_ith(ctx, vocab_size, n_prompt_tokens - 1);
         if (use_mtp) {
             llama_tokens history(prompt_tokens.begin(), prompt_tokens.begin() + n_prompt_tokens);
             common_speculative_begin(spec, 0, history);
@@ -817,6 +872,8 @@ int main(int argc, char ** argv) {
             std::vector<llama_token> draft;
 
             while (generated < p.n_gen) {
+                const int iteration = generated + 1;
+                const int generated_before = generated;
                 const int remaining = p.n_gen - generated;
                 const int n_draft_max = std::min(p.spec_draft_n_max, std::max(0, remaining - 1));
 
@@ -831,7 +888,7 @@ int main(int argc, char ** argv) {
                         /* .prompt   = */ &history,
                         /* .result   = */ &draft,
                     };
-                    llama_moe::set_profile_request_context(rep, generated + 1, "decode");
+                    llama_moe::set_profile_request_context(rep, iteration, "decode_mtp_draft");
                     common_speculative_draft(spec);
                     if ((int) draft.size() > n_draft_max) {
                         draft.resize((size_t) n_draft_max);
@@ -847,12 +904,13 @@ int main(int argc, char ** argv) {
                     common_batch_add(batch, draft[i], n_past + 1 + (llama_pos) i, { 0 }, true);
                 }
 
-                llama_moe::set_profile_request_context(rep, generated + 1, "decode");
+                llama_moe::set_profile_request_context(rep, iteration, "decode_target");
                 if (llama_decode(ctx, batch) != 0) {
                     fprintf(stderr, "decode failed at generated=%d (rep %d)\n", generated, rep);
                     exit_code = 1;
                     break;
                 }
+                llama_moe::set_profile_request_context(rep, iteration, "decode_mtp_process");
                 if (!common_speculative_process(spec, batch)) {
                     fprintf(stderr, "decode speculative process failed at generated=%d (rep %d)\n", generated, rep);
                     exit_code = 1;
@@ -880,31 +938,48 @@ int main(int argc, char ** argv) {
                     common_speculative_accept(spec, 0, (uint16_t) n_draft_accepted);
                 }
 
+                std::vector<llama_token> emitted;
+                emitted.reserve((size_t) 1 + (size_t) n_draft_accepted);
+                emitted.push_back(token);
+                for (int i = 0; i < n_draft_accepted; ++i) {
+                    emitted.push_back(draft[(size_t) i]);
+                }
+                const llama_token next_token = accepted.empty() ? 0 : accepted.back();
+                const int generated_after = generated + (int) emitted.size();
+                write_token_trace(rep, iteration, "mtp", generated_before, n_past,
+                        token, emitted, draft, n_draft_accepted, next_token, generated_after);
+
                 history.push_back(token);
                 for (int i = 0; i < n_draft_accepted; ++i) {
                     history.push_back(draft[(size_t) i]);
                 }
-                n_past += 1 + n_draft_accepted;
+                n_past += (int) emitted.size();
 
                 safe_context_seq_rm_tail(ctx, 0, n_past);
                 safe_context_seq_rm_tail(ctx_dft, 0, n_past);
 
-                token = accepted.back();
-                generated += (int) accepted.size();
+                token = next_token;
+                generated = generated_after;
 
                 update_vram_peak();
                 dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
             }
         } else {
             for (int gen = 0; gen < p.n_gen; ++gen) {
-                fill_token_batch(batch, &token, 1, n_prompt_tokens + gen, true);
-                llama_moe::set_profile_request_context(rep, gen + 1, "decode");
+                const llama_pos n_past = n_prompt_tokens + gen;
+                const llama_token token_in = token;
+                fill_token_batch(batch, &token_in, 1, n_past, true);
+                llama_moe::set_profile_request_context(rep, gen + 1, "decode_target");
                 if (llama_decode(ctx, batch) != 0) {
                     fprintf(stderr, "decode failed at gen %d (rep %d)\n", gen, rep);
                     exit_code = 1;
                     break;
                 }
                 token = greedy_token_ith(ctx, vocab_size, 0);
+                const std::vector<llama_token> emitted = { token_in };
+                const std::vector<llama_token> empty_draft;
+                write_token_trace(rep, gen + 1, "target", gen, n_past,
+                        token_in, emitted, empty_draft, 0, token, gen + 1);
                 update_vram_peak();
                 dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
             }
@@ -936,7 +1011,12 @@ int main(int argc, char ** argv) {
             (unsigned long long) profile.prefill.rows,
             (unsigned long long) profile.decode.rows);
 
+    if (token_trace.is_open()) {
+        token_trace.flush();
+    }
+
     llama_batch_free(batch);
+    llama_moe::slot_pool_shutdown_io();
     if (spec) {
         common_speculative_free(spec);
     }

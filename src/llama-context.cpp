@@ -525,6 +525,10 @@ llama_context::llama_context(
 }
 
 llama_context::~llama_context() {
+#ifdef LLAMA_MOE_OFFLOAD
+    llama_moe::reset_graph_state(gf_res_prev.get());
+    llama_moe::reset_graph_state(gf_res_reserve.get());
+#endif
     if (!model.hparams.no_alloc) {
         for (size_t i = 0; i < backend_ptrs.size(); ++i) {
             ggml_backend_t             backend = backend_ptrs[i];
@@ -633,6 +637,12 @@ void llama_context::sched_reserve() {
 
     LLAMA_LOG_DEBUG("%s: max_nodes = %zu\n", __func__, max_nodes);
 
+#ifdef LLAMA_MOE_OFFLOAD
+    if (llama_moe::runtime_enabled()) {
+        llama_moe::reset_graph_state(gf_res_prev.get());
+        llama_moe::reset_graph_state(gf_res_reserve.get());
+    }
+#endif
     gf_res_prev.reset(new llm_graph_result(max_nodes));
     gf_res_reserve.reset(new llm_graph_result(max_nodes));
 
@@ -843,6 +853,11 @@ bool llama_context::memory_update(bool optimize) {
         // reset the previous graph result to make sure that it won't be reused
         // TODO: change the mctx->apply() to return information if a graph reserve is needed
         //       reset the graph result only if the memory module did reset the scheduler
+#ifdef LLAMA_MOE_OFFLOAD
+        if (llama_moe::runtime_enabled()) {
+            llama_moe::reset_graph_state(gf_res_prev.get());
+        }
+#endif
         gf_res_prev->reset();
 
         if (!mctx->apply()) {
@@ -1383,33 +1398,35 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 
         n_reused++;
     } else {
+#ifdef LLAMA_MOE_OFFLOAD
+        if (llama_moe::runtime_enabled()) {
+            llama_moe::reset_graph_state(res);
+        }
+#endif
         res->reset();
 
         ggml_backend_sched_reset(sched.get());
 #ifdef LLAMA_MOE_OFFLOAD
-        if (llama_moe::runtime_enabled()) {
-            llama_moe::reset_graph_state();
-        }
         if (llama_moe::runtime_enabled() && llama_moe::streaming_mode()) {
-            ggml_backend_sched_set_eval_callback(sched.get(), llama_moe::moe_eval_callback, nullptr);
+            ggml_backend_sched_set_eval_callback(sched.get(), llama_moe::moe_eval_callback, res);
 
             static bool io_inited = false;
             if (!io_inited) {
                 io_inited = true;
                 llama_moe::slot_pool_init_io(llama_moe::get_manifest().source_path);
-
-                ggml_backend_t cuda_be = nullptr;
-                const int n_be = ggml_backend_sched_get_n_backends(sched.get());
-                for (int i = 0; i < n_be; ++i) {
-                    ggml_backend_t be = ggml_backend_sched_get_backend(sched.get(), i);
-                    const char * name = be ? ggml_backend_name(be) : nullptr;
-                    if (name && strncmp(name, "CUDA", 4) == 0) {
-                        cuda_be = be;
-                        break;
-                    }
-                }
-                llama_moe::slot_pool_set_compute_backend(cuda_be);
             }
+
+            ggml_backend_t cuda_be = nullptr;
+            const int n_be = ggml_backend_sched_get_n_backends(sched.get());
+            for (int i = 0; i < n_be; ++i) {
+                ggml_backend_t be = ggml_backend_sched_get_backend(sched.get(), i);
+                const char * name = be ? ggml_backend_name(be) : nullptr;
+                if (name && strncmp(name, "CUDA", 4) == 0) {
+                    cuda_be = be;
+                    break;
+                }
+            }
+            llama_moe::slot_pool_set_compute_backend(res, cuda_be);
         } else {
             ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
         }
@@ -2456,6 +2473,11 @@ ggml_cgraph * llama_context::graph_reserve(
     ggml_backend_sched_reset(sched.get());
 
     // when the scheduler is reset, we cannot reuse the old graph, so we reset the previous graph result to prevent that
+#ifdef LLAMA_MOE_OFFLOAD
+    if (llama_moe::runtime_enabled()) {
+        llama_moe::reset_graph_state(gf_res_prev.get());
+    }
+#endif
     gf_res_prev->reset();
 
     // store the n_outputs as it is, and restore it afterwards
@@ -2480,6 +2502,11 @@ ggml_cgraph * llama_context::graph_reserve(
 
     const auto gparams = graph_params(res, ubatch, mctx, ctx_type_to_graph_type(cparams.ctx_type));
 
+#ifdef LLAMA_MOE_OFFLOAD
+    if (llama_moe::runtime_enabled()) {
+        llama_moe::reset_graph_state(res);
+    }
+#endif
     res->reset();
 
     auto * gf = model.build_graph(gparams);
@@ -3459,6 +3486,11 @@ void llama_context::opt_epoch_iter(
 
             const auto gparams = graph_params(res, ubatch, mctx.get(), ctx_type_to_graph_type(cparams.ctx_type));
 
+#ifdef LLAMA_MOE_OFFLOAD
+            if (llama_moe::runtime_enabled()) {
+                llama_moe::reset_graph_state(res);
+            }
+#endif
             res->reset();
 
             auto * gf = model.build_graph(gparams);

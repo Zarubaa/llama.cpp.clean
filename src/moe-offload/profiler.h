@@ -105,6 +105,9 @@ struct profile_snapshot {
     profile_phase_stats prefill_target;
     profile_phase_stats prefill_mtp_process;
     profile_phase_stats decode;
+    profile_phase_stats decode_target;
+    profile_phase_stats decode_mtp_draft;
+    profile_phase_stats decode_mtp_process;
 };
 
 struct profile_summary_context {
@@ -171,6 +174,9 @@ private:
     profile_phase_stats prefill_target_stats;
     profile_phase_stats prefill_mtp_process_stats;
     profile_phase_stats decode_stats;
+    profile_phase_stats decode_target_stats;
+    profile_phase_stats decode_mtp_draft_stats;
+    profile_phase_stats decode_mtp_process_stats;
 };
 
 LLAMA_API std::string format_summary(

@@ -153,6 +153,12 @@ struct io_worker {
     FILE *        fp = nullptr;
     std::atomic<int> outstanding{0};
 
+    ~io_worker() {
+        // The thread waits on queue.cv. Stop and join it before member
+        // destruction reaches the queue/condition variable.
+        stop();
+    }
+
     void run() {
         io_request req;
         while (!stop_flag.load(std::memory_order_relaxed)) {

@@ -1,0 +1,3 @@
+repeat,iteration,phase,generated_before,n_past,token_in,emitted_tokens,draft_tokens,draft_accepted,next_token,generated_after
+0,1,mtp,0,16,21251,"21251 13","13",1,21251,2
+0,3,mtp,2,18,21251,"21251 13","13",1,21251,4

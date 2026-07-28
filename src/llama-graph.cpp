@@ -1926,7 +1926,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
 #ifdef LLAMA_MOE_OFFLOAD
     ggml_tensor * slot_selected_experts = llama_moe::remap_selected_experts(
-            ctx0, selected_experts, il, n_expert, n_expert_used);
+            ctx0, selected_experts, res, il, n_expert, n_expert_used);
 #else
     ggml_tensor * slot_selected_experts = selected_experts;
 #endif
@@ -1975,7 +1975,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     {
         const char * topk_diag = std::getenv("LLAMA_MOE_TOPK_FUSION_DIAG");
         if (topk_diag && topk_diag[0] != '\0' && std::strcmp(topk_diag, "0") != 0 && n_tokens == 1) {
-            llama_moe::register_weights_for_topk(il, routing_selected_experts, weights);
+            llama_moe::register_weights_for_topk(res, il, routing_selected_experts, weights);
         }
     }
 #endif

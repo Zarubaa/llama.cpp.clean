@@ -72,21 +72,22 @@ struct slot_pool_state {
     // eval-callback's mid-graph `ggml_backend_tensor_set` is read correctly
     // by the immediately-following `ggml_get_rows` consumer.
     std::vector<ggml_tensor *> slot_table_tensors;
-    // Per-graph top-k registries. Streaming mode uses topk_to_slot_ids so the
-    // callback can fill the exact ids consumed by MUL_MAT_ID. The older
-    // slot-table path is kept for guarded fallback diagnostics.
-    std::unordered_map<ggml_tensor *, ggml_tensor *> topk_to_slot_table;
-    std::unordered_map<ggml_tensor *, ggml_tensor *> topk_to_slot_ids;
-    std::unordered_map<ggml_tensor *, int> topk_to_logical;
-    // Phase H: optional callback points after routing weights. This lets the
-    // CUDA top-k MoE fusion compute ids+weights together before the callback
-    // pauses execution to make slot weights resident.
-    std::unordered_map<ggml_tensor *, ggml_tensor *> callback_to_topk;
-    std::unordered_map<ggml_tensor *, ggml_tensor *> topk_to_callback;
-    // Flat list of all registered slot_table tensors across graph builds.
-    // Used by populate_slot_tables_identity (non-streaming mode) which writes
-    // the identity mapping to all of them.
-    std::vector<ggml_tensor *> all_slot_tables;
+    struct graph_registry {
+        // Streaming mode fills slot ids consumed by MUL_MAT_ID. The older
+        // slot-table path remains for guarded fallback diagnostics.
+        std::unordered_map<ggml_tensor *, ggml_tensor *> topk_to_slot_table;
+        std::unordered_map<ggml_tensor *, ggml_tensor *> topk_to_slot_ids;
+        std::unordered_map<ggml_tensor *, int> topk_to_logical;
+        // Optional post-routing callback points used by fused top-k MoE.
+        std::unordered_map<ggml_tensor *, ggml_tensor *> callback_to_topk;
+        std::unordered_map<ggml_tensor *, ggml_tensor *> topk_to_callback;
+        std::vector<ggml_tensor *> all_slot_tables;
+        ggml_backend_t compute_backend = nullptr;
+    };
+
+    // A target context and its MTP draft context keep independent reusable
+    // graphs but intentionally share the same expert slots and LRU state.
+    std::unordered_map<const void *, graph_registry> graph_registries;
 
     // Phase D-2: per-logical-layer LRU cache (only used when streaming).
     struct layer_cache {
@@ -116,9 +117,10 @@ struct slot_pool_state {
     uint64_t token_idx = 0;
     uint64_t current_token_idx = 0;
 
-    // Phase H: CUDA backend whose compute stream is stalled on async H2D
-    // events via cudaStreamWaitEvent. Set by slot_pool_set_compute_backend.
-    // When null, the eval-callback falls back to synchronous H2D.
+    // Graph/backend pair for the callback currently executing. Per-graph
+    // registration alone must not activate a backend: target and MTP graph
+    // construction can interleave, while their compute streams are distinct.
+    const void * active_graph_owner = nullptr;
     ggml_backend_t compute_backend = nullptr;
 
     // Phase I: per-batch buffered profile rows. We record compute_us / h2d_us
@@ -312,6 +314,10 @@ void configure_slot_pool() {
     s.n_global_slots = 0;
     s.global_slot_tensors.clear();
     s.slot_tensors.clear();
+    s.slot_table_tensors.clear();
+    s.graph_registries.clear();
+    s.active_graph_owner = nullptr;
+    s.compute_backend = nullptr;
 
     if (!runtime_enabled()) {
         return;
@@ -328,12 +334,6 @@ void configure_slot_pool() {
     s.global_slot_tensors.clear();
     s.slot_tensors.assign(mf.n_layers, std::array<ggml_tensor *, EXPERT_KIND_COUNT>{nullptr, nullptr, nullptr});
     s.slot_table_tensors.assign(mf.n_layers, nullptr);
-    s.topk_to_slot_table.clear();
-    s.topk_to_slot_ids.clear();
-    s.topk_to_logical.clear();
-    s.callback_to_topk.clear();
-    s.topk_to_callback.clear();
-    s.all_slot_tables.clear();
     s.cache.assign(mf.n_layers, slot_pool_state::layer_cache{});
     for (auto & lc : s.cache) {
         lc.slot_to_expert.assign(s.n_slots, -1);
@@ -382,12 +382,9 @@ void reset_slot_pool() {
     s.global_slot_tensors.clear();
     s.slot_tensors.clear();
     s.slot_table_tensors.clear();
-    s.topk_to_slot_table.clear();
-    s.topk_to_slot_ids.clear();
-    s.topk_to_logical.clear();
-    s.callback_to_topk.clear();
-    s.topk_to_callback.clear();
-    s.all_slot_tables.clear();
+    s.graph_registries.clear();
+    s.active_graph_owner = nullptr;
+    s.compute_backend = nullptr;
     s.cache.clear();
     s.slot_table_host.clear();
     s.io_scratch.clear();
@@ -835,19 +832,24 @@ bool prefetch_all_experts() {
     return true;
 }
 
-void register_slot_table_for_topk(int logical_layer, ggml_tensor * topk, ggml_tensor * slot_table) {
+void register_slot_table_for_topk(
+        const void * graph_owner,
+        int logical_layer,
+        ggml_tensor * topk,
+        ggml_tensor * slot_table) {
     auto & s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
-    if (!s.configured || !topk || !slot_table) {
+    if (!s.configured || !graph_owner || !topk || !slot_table) {
         if (debug_d4_trace()) {
-            fprintf(stderr, "[moe-d4] register_slot_table_for_topk SKIP: cfg=%d topk=%p st=%p L=%d\n",
-                    s.configured ? 1 : 0, (void*)topk, (void*)slot_table, logical_layer);
+            fprintf(stderr, "[moe-d4] register_slot_table_for_topk SKIP: cfg=%d owner=%p topk=%p st=%p L=%d\n",
+                    s.configured ? 1 : 0, graph_owner, (void *) topk, (void *) slot_table, logical_layer);
         }
         return;
     }
-    s.topk_to_slot_table[topk]   = slot_table;
-    s.topk_to_logical[topk]      = logical_layer;
-    s.all_slot_tables.push_back(slot_table);
+    auto & registry = s.graph_registries[graph_owner];
+    registry.topk_to_slot_table[topk] = slot_table;
+    registry.topk_to_logical[topk] = logical_layer;
+    registry.all_slot_tables.push_back(slot_table);
     static int reg_cnt = 0;
     if (debug_d4_trace() && reg_cnt < 4) {
         fprintf(stderr, "[moe-d4] register_slot_table_for_topk #%d L=%d topk=%p st=%p st->buf=%s\n",
@@ -857,19 +859,24 @@ void register_slot_table_for_topk(int logical_layer, ggml_tensor * topk, ggml_te
     ++reg_cnt;
 }
 
-void register_weights_for_topk(int logical_layer, ggml_tensor * topk, ggml_tensor * weights) {
+void register_weights_for_topk(
+        const void * graph_owner,
+        int logical_layer,
+        ggml_tensor * topk,
+        ggml_tensor * weights) {
     auto & s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
-    if (!s.configured || !topk || !weights) {
+    if (!s.configured || !graph_owner || !topk || !weights) {
         if (debug_d4_trace()) {
-            fprintf(stderr, "[moe-d4] register_weights_for_topk SKIP: cfg=%d topk=%p weights=%p L=%d\n",
-                    s.configured ? 1 : 0, (void*) topk, (void*) weights, logical_layer);
+            fprintf(stderr, "[moe-d4] register_weights_for_topk SKIP: cfg=%d owner=%p topk=%p weights=%p L=%d\n",
+                    s.configured ? 1 : 0, graph_owner, (void *) topk, (void *) weights, logical_layer);
         }
         return;
     }
-    s.callback_to_topk[weights] = topk;
-    s.topk_to_callback[topk] = weights;
-    s.topk_to_logical[weights] = logical_layer;
+    auto & registry = s.graph_registries[graph_owner];
+    registry.callback_to_topk[weights] = topk;
+    registry.topk_to_callback[topk] = weights;
+    registry.topk_to_logical[weights] = logical_layer;
     static int reg_cnt = 0;
     if (debug_d4_trace() && reg_cnt < 4) {
         fprintf(stderr, "[moe-d4] register_weights_for_topk #%d L=%d topk=%p weights=%p\n",
@@ -878,18 +885,23 @@ void register_weights_for_topk(int logical_layer, ggml_tensor * topk, ggml_tenso
     ++reg_cnt;
 }
 
-void register_slot_ids_for_topk(int logical_layer, ggml_tensor * topk, ggml_tensor * slot_ids) {
+void register_slot_ids_for_topk(
+        const void * graph_owner,
+        int logical_layer,
+        ggml_tensor * topk,
+        ggml_tensor * slot_ids) {
     auto & s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
-    if (!s.configured || !topk || !slot_ids) {
+    if (!s.configured || !graph_owner || !topk || !slot_ids) {
         if (std::getenv("LLAMA_MOE_DEBUG_SLOT_IDS")) {
-            fprintf(stderr, "[moe-d4] register_slot_ids_for_topk SKIP: cfg=%d topk=%p ids=%p L=%d\n",
-                    s.configured ? 1 : 0, (void*) topk, (void*) slot_ids, logical_layer);
+            fprintf(stderr, "[moe-d4] register_slot_ids_for_topk SKIP: cfg=%d owner=%p topk=%p ids=%p L=%d\n",
+                    s.configured ? 1 : 0, graph_owner, (void *) topk, (void *) slot_ids, logical_layer);
         }
         return;
     }
-    s.topk_to_slot_ids[topk] = slot_ids;
-    s.topk_to_logical[topk]  = logical_layer;
+    auto & registry = s.graph_registries[graph_owner];
+    registry.topk_to_slot_ids[topk] = slot_ids;
+    registry.topk_to_logical[topk] = logical_layer;
     static int reg_cnt = 0;
     if (std::getenv("LLAMA_MOE_DEBUG_SLOT_IDS") && reg_cnt < 4) {
         fprintf(stderr, "[moe-d4] register_slot_ids_for_topk #%d L=%d topk=%p ids=%p ids->buf=%s\n",
@@ -899,15 +911,21 @@ void register_slot_ids_for_topk(int logical_layer, ggml_tensor * topk, ggml_tens
     ++reg_cnt;
 }
 
-void reset_graph_state() {
+void reset_graph_state(const void * graph_owner) {
+    if (!graph_owner) {
+        return;
+    }
     auto & s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
-    s.topk_to_slot_table.clear();
-    s.topk_to_slot_ids.clear();
-    s.topk_to_logical.clear();
-    s.callback_to_topk.clear();
-    s.topk_to_callback.clear();
-    s.all_slot_tables.clear();
+    const auto it = s.graph_registries.find(graph_owner);
+    if (it == s.graph_registries.end()) {
+        return;
+    }
+    if (s.active_graph_owner == graph_owner) {
+        s.active_graph_owner = nullptr;
+        s.compute_backend = nullptr;
+    }
+    s.graph_registries.erase(it);
 }
 
 void populate_slot_tables_identity() {
@@ -919,7 +937,10 @@ void populate_slot_tables_identity() {
         if (!s.configured) {
             return;
         }
-        tensors = s.all_slot_tables;
+        for (const auto & entry : s.graph_registries) {
+            const auto & registered = entry.second.all_slot_tables;
+            tensors.insert(tensors.end(), registered.begin(), registered.end());
+        }
     }
     n_experts = get_manifest().n_experts_per_layer;
     if (n_experts == 0) {
@@ -1156,7 +1177,6 @@ bool slot_pool_hot_start(const std::vector<std::vector<int>> & experts_by_layer)
 
 bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
     const auto callback_start = std::chrono::steady_clock::now();
-    (void) user_data;
     if (!t || !t->name[0]) {
         return true;
     }
@@ -1177,31 +1197,41 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
         if (!s.configured) {
             return false;
         }
-        if (s.topk_to_logical.find(t) == s.topk_to_logical.end()) {
+        const auto registry_it = s.graph_registries.find(user_data);
+        if (registry_it == s.graph_registries.end()) {
             return false;
         }
-        const bool has_callback = s.topk_to_callback.find(t) != s.topk_to_callback.end();
+        const auto & registry = registry_it->second;
+        if (registry.topk_to_logical.find(t) == registry.topk_to_logical.end()) {
+            return false;
+        }
+        const bool has_callback = registry.topk_to_callback.find(t) != registry.topk_to_callback.end();
         return !has_callback;
     }
 
     std::lock_guard<std::mutex> lock(s.mutex);
     if (!s.configured) return true;
+    const auto registry_it = s.graph_registries.find(user_data);
+    if (registry_it == s.graph_registries.end()) return true;
+    const auto & registry = registry_it->second;
+    s.active_graph_owner = user_data;
+    s.compute_backend = registry.compute_backend;
     release_completed_h2d_buffers(s);
 
     // Fast lookup: only react to top-k tensors, or to an alternate callback
     // tensor that maps back to a top-k tensor.
     ggml_tensor * topk_tensor = t;
-    auto cb_it = s.callback_to_topk.find(t);
-    if (cb_it != s.callback_to_topk.end()) {
+    auto cb_it = registry.callback_to_topk.find(t);
+    if (cb_it != registry.callback_to_topk.end()) {
         topk_tensor = cb_it->second;
     }
 
-    auto stt_it = s.topk_to_slot_table.find(topk_tensor);
-    ggml_tensor * stt = stt_it == s.topk_to_slot_table.end() ? nullptr : stt_it->second;
-    auto slot_ids_it = s.topk_to_slot_ids.find(topk_tensor);
-    ggml_tensor * slot_ids_tensor = slot_ids_it == s.topk_to_slot_ids.end() ? nullptr : slot_ids_it->second;
-    auto log_it = s.topk_to_logical.find(t);
-    if (log_it == s.topk_to_logical.end()) return true;
+    auto stt_it = registry.topk_to_slot_table.find(topk_tensor);
+    ggml_tensor * stt = stt_it == registry.topk_to_slot_table.end() ? nullptr : stt_it->second;
+    auto slot_ids_it = registry.topk_to_slot_ids.find(topk_tensor);
+    ggml_tensor * slot_ids_tensor = slot_ids_it == registry.topk_to_slot_ids.end() ? nullptr : slot_ids_it->second;
+    auto log_it = registry.topk_to_logical.find(t);
+    if (log_it == registry.topk_to_logical.end()) return true;
     const int logical = log_it->second;
 
     // Phase I: the scheduler has just computed and synchronized the graph
@@ -2074,17 +2104,24 @@ void slot_pool_shutdown_io() {
             __func__, io_events_in_use());
 }
 
-void slot_pool_set_compute_backend(ggml_backend_t backend) {
+void slot_pool_set_compute_backend(const void * graph_owner, ggml_backend_t backend) {
     auto & s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
-    s.compute_backend = backend;
-    LLAMA_LOG_INFO("%s: compute backend = %s\n", __func__,
-            backend ? ggml_backend_name(backend) : "<none>");
+    if (!graph_owner) {
+        return;
+    }
+    s.graph_registries[graph_owner].compute_backend = backend;
+    if (debug_d4_trace()) {
+        LLAMA_LOG_DEBUG("%s: graph owner %p compute backend = %s\n", __func__, graph_owner,
+                backend ? ggml_backend_name(backend) : "<none>");
+    }
 }
 
 void slot_pool_begin_request() {
     auto & s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
+    s.active_graph_owner = nullptr;
+    s.compute_backend = nullptr;
     s.current_request_phase = "unknown";
     if (s.pred) {
         s.pred->begin_request();
@@ -2179,6 +2216,8 @@ void slot_pool_end_request() {
 
     (void) end_request_start;
     add_current_request_timing(s.current_request_phase.c_str(), predictor_end_us, predictor_save_us, profile_flush_us, sidecar_write_bytes);
+    s.active_graph_owner = nullptr;
+    s.compute_backend = nullptr;
     s.current_request_phase = "unknown";
 }
 

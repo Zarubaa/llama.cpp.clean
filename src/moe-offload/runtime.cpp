@@ -193,6 +193,7 @@ void reset_profile() {
 ggml_tensor * remap_selected_experts(
         ggml_context * ctx,
         ggml_tensor * selected_experts,
+        const void * graph_owner,
         int layer,
         int64_t n_expert,
         int64_t n_expert_used) {
@@ -217,7 +218,7 @@ ggml_tensor * remap_selected_experts(
     ggml_tensor * slot_ids = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, neu, nt);
     ggml_format_name(slot_ids, "moe.slot_ids.%d", layer);
     ggml_set_output(slot_ids);
-    register_slot_ids_for_topk(layer, selected_experts, slot_ids);
+    register_slot_ids_for_topk(graph_owner, layer, selected_experts, slot_ids);
     return slot_ids;
 }
 
