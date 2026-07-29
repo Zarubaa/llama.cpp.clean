@@ -1,0 +1,2 @@
+index, name, memory.used [MiB], memory.total [MiB], utilization.gpu [%]
+1, NVIDIA L20, 3 MiB, 46068 MiB, 0 %

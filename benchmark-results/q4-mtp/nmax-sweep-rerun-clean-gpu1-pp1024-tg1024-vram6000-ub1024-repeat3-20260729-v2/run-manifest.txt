@@ -1,0 +1,28 @@
+started=2026-07-29T04:24:31+00:00
+physical_gpu=1
+CUDA_VISIBLE_DEVICES=1
+model=/workspace/models/Qwen3.6-35BA3B-MTP-UD-Q4_K_M.moe.gguf
+model_sha256=d9e4b0e8cbe3f94d057f5aecde28c38e08b42c3ec8840da29f5abd6b716e6900
+prompt_file=/workspace/benchmark-results/q8-mtp/fix-fair-ab-normal-request-pp1024-tg1024-vram6000-ub1024-repeat3/prompt.txt
+prompt_sha256=e690343f2fffd2560484f93def97aa39e943419eb62b7d8f3b6d7509d2dc8eb2
+prompt_bytes=50159
+pp=1024
+tg=1024
+repeat=3
+ubatch=1024
+cache_mb=6000
+predictor=lru
+warm_cache=true
+reset_gpu_expert_cache_between_repeats=true
+git_commit=28b84e3e22c31eac9df374c1135bc35b51713b35
+binary_sha256=e16d5af1e122e7e5e57f8a96e3e6bebc3716cf7071253251de84374d0ebb4436
+binary_mtime=2026-07-29 03:43:04.287900775 +0000
+gpu_snapshot_start
+1, NVIDIA L20, 3 MiB, 46068 MiB, 0 %
+gpu_compute_start
+finished=2026-07-29T04:39:48+00:00
+exit_code=0
+gpu_snapshot_end
+index, name, memory.used [MiB], memory.total [MiB], utilization.gpu [%]
+1, NVIDIA L20, 3 MiB, 46068 MiB, 0 %
+gpu_compute_end

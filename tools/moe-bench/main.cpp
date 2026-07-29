@@ -635,20 +635,27 @@ int main(int argc, char ** argv) {
 
     const llama_vocab * vocab = llama_model_get_vocab(model);
     const int vocab_size = llama_vocab_n_tokens(vocab);
-    const int n_tokens_max = p.n_prompt + 128;
-    std::vector<llama_token> prompt_tokens((size_t) n_tokens_max);
-    int n_prompt_tokens = llama_tokenize(vocab,
-            prompt_text.c_str(), (int) prompt_text.size(),
-            prompt_tokens.data(), n_tokens_max, true, true);
-    if (n_prompt_tokens < 0) {
-        n_prompt_tokens = p.n_prompt;
-        for (int i = 0; i < n_prompt_tokens; ++i) {
-            prompt_tokens[i] = (i % 32000) + 1;
+    std::vector<llama_token> prompt_tokens = common_tokenize(vocab, prompt_text, true, true);
+    const size_t n_prompt_tokens_raw = prompt_tokens.size();
+    if (prompt_tokens.empty()) {
+        fprintf(stderr, "[moe-bench] ERROR: prompt tokenization produced no tokens\n");
+        if (spec) {
+            common_speculative_free(spec);
         }
+        if (ctx_dft) {
+            llama_free(ctx_dft);
+        }
+        llama_free(ctx);
+        llama_model_free(model);
+        llama_backend_free();
+        return 1;
     }
-    if (n_prompt_tokens > p.n_prompt) {
-        n_prompt_tokens = p.n_prompt;
+    if (prompt_tokens.size() > (size_t) p.n_prompt) {
+        prompt_tokens.resize((size_t) p.n_prompt);
     }
+    const int n_prompt_tokens = (int) prompt_tokens.size();
+    fprintf(stderr, "[moe-bench] prompt tokenization: raw=%zu used=%d requested=%d\n",
+            n_prompt_tokens_raw, n_prompt_tokens, p.n_prompt);
 
     if (p.moe_hot_start) {
         const uint32_t n_slots = llama_moe::n_slots_per_layer();
@@ -781,7 +788,11 @@ int main(int argc, char ** argv) {
             llama_memory_clear(llama_get_memory(ctx_dft), true);
         }
         llama_moe::set_profile_request_context(-1, -1, "warmup");
-        fill_token_batch(batch, prompt_tokens.data(), n_prompt_tokens, 0, use_mtp);
+        // MTP needs the unmasked per-token nextn hidden states, which are
+        // collected independently of the logits output mask.  Requesting
+        // logits for every prompt token would unnecessarily run the large
+        // vocabulary head for all rows and would not match llama-server.
+        fill_token_batch(batch, prompt_tokens.data(), n_prompt_tokens, 0, false);
         if (llama_decode(ctx, batch) != 0) {
             fprintf(stderr, "warm-cache prefill decode failed\n");
             llama_moe::slot_pool_shutdown_io();
@@ -830,7 +841,7 @@ int main(int argc, char ** argv) {
 
         const double t0 = now_ms();
         llama_moe::set_profile_request_context(rep, 0, "prefill_target");
-        fill_token_batch(batch, prompt_tokens.data(), n_prompt_tokens, 0, use_mtp);
+        fill_token_batch(batch, prompt_tokens.data(), n_prompt_tokens, 0, false);
         if (llama_decode(ctx, batch) != 0) {
             fprintf(stderr, "prefill decode failed (rep %d)\n", rep);
             exit_code = 1;
@@ -845,12 +856,12 @@ int main(int argc, char ** argv) {
             exit_code = 1;
             break;
         }
-        update_vram_peak();
-        dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
         const double t1 = now_ms();
         const double measured_ttft_ms = t1 - t0;
         const double measured_prefill_target_ms = t_target - t0;
         const double measured_prefill_mtp_process_ms = spec ? t1 - t_target : 0.0;
+        update_vram_peak();
+        dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
         ttft_ms.push_back(measured_ttft_ms);
         prefill_target_ms.push_back(measured_prefill_target_ms);
         prefill_mtp_process_ms.push_back(measured_prefill_mtp_process_ms);

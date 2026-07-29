@@ -1,0 +1,2 @@
+  RES PAGES  SIZE FILE
+17.5M  4487 21.1G /data/hf_models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.moe.gguf

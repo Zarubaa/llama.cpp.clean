@@ -1,0 +1,2 @@
+  RES   PAGES  SIZE FILE
+21.1G 5528254 21.1G /workspace/models/Qwen3.6-35BA3B-MTP-UD-Q4_K_M.moe.gguf

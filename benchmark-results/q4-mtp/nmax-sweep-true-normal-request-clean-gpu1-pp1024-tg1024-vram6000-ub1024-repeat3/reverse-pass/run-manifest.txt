@@ -1,0 +1,16 @@
+started=2026-07-29T04:04:31+00:00
+physical_gpu=1
+CUDA_VISIBLE_DEVICES=1
+gpu_condition=exclusive_clean_gpu
+parent_pass=pass-a-at-parent-root
+case_order=mtp-nmax2,mtp-nmax3,mtp-nmax1,mtp-nmax4,without-mtp
+pp=1024
+tg=1024
+repeat=3
+context=4096
+ubatch=1024
+cache_mb=6000
+predictor=lru
+prompt_sha256=e690343f2fffd2560484f93def97aa39e943419eb62b7d8f3b6d7509d2dc8eb2
+model_sha256=d9e4b0e8cbe3f94d057f5aecde28c38e08b42c3ec8840da29f5abd6b716e6900
+binary_sha256=e16d5af1e122e7e5e57f8a96e3e6bebc3716cf7071253251de84374d0ebb4436

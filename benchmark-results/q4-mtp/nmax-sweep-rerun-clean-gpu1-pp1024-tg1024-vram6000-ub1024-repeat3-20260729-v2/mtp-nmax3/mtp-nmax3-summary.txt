@@ -1,0 +1,265 @@
+model: qwen35moe 35B.A3B Q4_K - Medium
+predictor: lru       cache: 6000 MB   ssd: /workspace/models
+n_prompt: 1024  n_gen: 1024  repeats: 3
+
+ubatch: requested=1024 effective=1024  slots=59/256/256  mode=streaming
+
+calibration: cache_reset_between_repeats=true  warm_cache=true  hot_start=false
+
+speculative: draft-mtp  draft_n_max=3  draft_tokens=3612  draft_accepted=1866  accept_rate=51.7%
+
+phase                 tokens   total_ms   per_token_ms   tok/s
+prefill_target          1024     4044.6          3.95      253
+prefill_mtp_process     1024      148.2          0.14     6912
+prefill_total           1024     4192.7          4.09      244
+decode                  1024    58919.4         57.54       17
+
+decode profiler split, mean wall over repeats:
+  target_verify         52518.7 ms  rows=48240  requests=1206  hit=76.7%
+  mtp_draft              3067.5 ms  rows=3618  requests=3618  hit=73.7%
+  mtp_process            1005.4 ms  rows=1206  requests=1206  hit=89.2%
+
+cache hit rate (prefill_target): 0.0%
+cache hit rate (prefill_mtp_process): 0.0%
+cache hit rate (prefill_total): 0.0%
+cache hit rate (decode): 76.9%
+cache hit rate (decode_target): 76.7%
+cache hit rate (decode_mtp_draft): 73.7%
+cache hit rate (decode_mtp_process): 89.2%
+route hit coverage (prefill_target): 0.0%
+route hit coverage (prefill_mtp_process): 0.0%
+route hit coverage (prefill_total): 0.0%
+route persistent coverage (prefill_target): 76.2%
+route persistent coverage (prefill_mtp_process): 78.0%
+route persistent coverage (prefill_total): 76.2%
+route hit coverage (decode): 82.0%
+route hit coverage (decode_target): 82.0%
+route hit coverage (decode_mtp_draft): 73.7%
+route hit coverage (decode_mtp_process): 91.3%
+route persistent coverage (decode): 100.0%
+route persistent coverage (decode_target): 100.0%
+route persistent coverage (decode_mtp_draft): 100.0%
+route persistent coverage (decode_mtp_process): 100.0%
+SSD bytes read (decode): 436.19 GB  (avg 145.40 MB/token)
+TTFT: 4192.7 ms
+TTFT target prefill: 4044.6 ms
+TTFT MTP process: 148.2 ms
+TTFT cold: 4192.7 ms  (n=3)
+TTFT warm: 0.0 ms  (n=0)
+TPOT: 57.54 ms
+total: 63112.1 ms
+
+I/O breakdown (prefill_target, mean per token):
+  ssd_read           3.18 ms
+  h2d                1.63 ms
+  gpu_compute        0.31 ms
+  stall (overlap loss)     0.34 ms
+  predictor          0.00 ms
+
+Profiler breakdown (prefill_target, mean per token):
+  predictor_observe     0.00 ms
+  predictor_score       0.00 ms
+  callback_wall         3.58 ms
+  topk_d2h              0.00 ms
+  slot_ids_h2d          0.00 ms
+  slot_table_h2d        0.00 ms
+  route_rank            0.00 ms
+  eamc_cosine           0.00 ms
+  eamc_materialize      0.00 ms
+  eamc_rows_scored       0.0 rows/token
+  eamc_cache_hits       0.00 hits/token
+  eamc_cache_misses     0.00 misses/token
+  request_end           0.05 ms
+  predictor_end         0.00 ms
+  predictor_save        0.00 ms
+  profile_flush         0.00 ms
+  sidecar_written       0.00 MB/token
+  empty_admit           2.30 experts/token
+  victim_admit          0.00 experts/token
+  scratch               5.63 experts/token
+
+I/O breakdown (prefill_mtp_process, mean per token):
+  ssd_read           0.11 ms
+  h2d                0.06 ms
+  gpu_compute        0.01 ms
+  stall (overlap loss)     0.01 ms
+  predictor          0.00 ms
+
+Profiler breakdown (prefill_mtp_process, mean per token):
+  predictor_observe     0.00 ms
+  predictor_score       0.00 ms
+  callback_wall         0.12 ms
+  topk_d2h              0.00 ms
+  slot_ids_h2d          0.00 ms
+  slot_table_h2d        0.00 ms
+  route_rank            0.00 ms
+  eamc_cosine           0.00 ms
+  eamc_materialize      0.00 ms
+  eamc_rows_scored       0.0 rows/token
+  eamc_cache_hits       0.00 hits/token
+  eamc_cache_misses     0.00 misses/token
+  request_end           0.00 ms
+  predictor_end         0.00 ms
+  predictor_save        0.00 ms
+  profile_flush         0.00 ms
+  sidecar_written       0.00 MB/token
+  empty_admit           0.06 experts/token
+  victim_admit          0.00 experts/token
+  scratch               0.13 experts/token
+
+I/O breakdown (prefill_total, mean per token):
+  ssd_read           3.29 ms
+  h2d                1.69 ms
+  gpu_compute        0.32 ms
+  stall (overlap loss)     0.35 ms
+  predictor          0.00 ms
+
+Profiler breakdown (prefill_total, mean per token):
+  predictor_observe     0.00 ms
+  predictor_score       0.00 ms
+  callback_wall         3.70 ms
+  topk_d2h              0.00 ms
+  slot_ids_h2d          0.00 ms
+  slot_table_h2d        0.00 ms
+  route_rank            0.00 ms
+  eamc_cosine           0.00 ms
+  eamc_materialize      0.00 ms
+  eamc_rows_scored       0.0 rows/token
+  eamc_cache_hits       0.00 hits/token
+  eamc_cache_misses     0.00 misses/token
+  request_end           0.05 ms
+  predictor_end         0.00 ms
+  predictor_save        0.00 ms
+  profile_flush         0.00 ms
+  sidecar_written       0.00 MB/token
+  empty_admit           2.36 experts/token
+  victim_admit          0.00 experts/token
+  scratch               5.76 experts/token
+
+I/O breakdown (decode, mean per token):
+  ssd_read          40.26 ms
+  h2d               28.16 ms
+  gpu_compute        5.14 ms
+  stall (overlap loss)     9.23 ms
+  predictor          0.05 ms
+
+Profiler breakdown (decode, mean per token):
+  predictor_observe     0.00 ms
+  predictor_score       0.05 ms
+  callback_wall        48.35 ms
+  topk_d2h              0.16 ms
+  slot_ids_h2d          0.27 ms
+  slot_table_h2d        0.00 ms
+  route_rank            0.03 ms
+  eamc_cosine           0.00 ms
+  eamc_materialize      0.00 ms
+  eamc_rows_scored       0.0 rows/token
+  eamc_cache_hits       0.00 hits/token
+  eamc_cache_misses     0.00 misses/token
+  request_end           0.47 ms
+  predictor_end         0.00 ms
+  predictor_save        0.00 ms
+  profile_flush         0.02 ms
+  sidecar_written       0.00 MB/token
+  empty_admit           0.00 experts/token
+  victim_admit         79.74 experts/token
+  scratch               0.00 experts/token
+
+I/O breakdown (decode_target, mean per token):
+  ssd_read          38.38 ms
+  h2d               26.85 ms
+  gpu_compute        4.20 ms
+  stall (overlap loss)     8.86 ms
+  predictor          0.05 ms
+
+Profiler breakdown (decode_target, mean per token):
+  predictor_observe     0.00 ms
+  predictor_score       0.05 ms
+  callback_wall        46.05 ms
+  topk_d2h              0.14 ms
+  slot_ids_h2d          0.24 ms
+  slot_table_h2d        0.00 ms
+  route_rank            0.03 ms
+  eamc_cosine           0.00 ms
+  eamc_materialize      0.00 ms
+  eamc_rows_scored       0.0 rows/token
+  eamc_cache_hits       0.00 hits/token
+  eamc_cache_misses     0.00 misses/token
+  request_end           0.43 ms
+  predictor_end         0.00 ms
+  predictor_save        0.00 ms
+  profile_flush         0.01 ms
+  sidecar_written       0.00 MB/token
+  empty_admit           0.00 experts/token
+  victim_admit         76.18 experts/token
+  scratch               0.00 experts/token
+
+I/O breakdown (decode_mtp_draft, mean per token):
+  ssd_read           1.32 ms
+  h2d                0.91 ms
+  gpu_compute        0.88 ms
+  stall (overlap loss)     0.26 ms
+  predictor          0.00 ms
+
+Profiler breakdown (decode_mtp_draft, mean per token):
+  predictor_observe     0.00 ms
+  predictor_score       0.00 ms
+  callback_wall         1.61 ms
+  topk_d2h              0.01 ms
+  slot_ids_h2d          0.02 ms
+  slot_table_h2d        0.00 ms
+  route_rank            0.00 ms
+  eamc_cosine           0.00 ms
+  eamc_materialize      0.00 ms
+  eamc_rows_scored       0.0 rows/token
+  eamc_cache_hits       0.00 hits/token
+  eamc_cache_misses     0.00 misses/token
+  request_end           0.03 ms
+  predictor_end         0.00 ms
+  predictor_save        0.00 ms
+  profile_flush         0.01 ms
+  sidecar_written       0.00 MB/token
+  empty_admit           0.00 experts/token
+  victim_admit          2.48 experts/token
+  scratch               0.00 experts/token
+
+I/O breakdown (decode_mtp_process, mean per token):
+  ssd_read           0.56 ms
+  h2d                0.39 ms
+  gpu_compute        0.06 ms
+  stall (overlap loss)     0.11 ms
+  predictor          0.00 ms
+
+Profiler breakdown (decode_mtp_process, mean per token):
+  predictor_observe     0.00 ms
+  predictor_score       0.00 ms
+  callback_wall         0.69 ms
+  topk_d2h              0.00 ms
+  slot_ids_h2d          0.01 ms
+  slot_table_h2d        0.00 ms
+  route_rank            0.00 ms
+  eamc_cosine           0.00 ms
+  eamc_materialize      0.00 ms
+  eamc_rows_scored       0.0 rows/token
+  eamc_cache_hits       0.00 hits/token
+  eamc_cache_misses     0.00 misses/token
+  request_end           0.01 ms
+  predictor_end         0.00 ms
+  predictor_save        0.00 ms
+  profile_flush         0.00 ms
+  sidecar_written       0.00 MB/token
+  empty_admit           0.00 experts/token
+  victim_admit          1.08 experts/token
+  scratch               0.00 experts/token
+
+Wall/profile reconciliation (decode):
+  wall_decode_us        176758073
+  profiled_decode_us    255940380
+  unattributed_decode_us -79182307
+
+VRAM peak (process approx): 12.01 GB / 44.39 GB  (baseline-adjusted; experts budget: 5.86 GB, non-expert/process overhead: 6.15 GB)
+VRAM device used: baseline=0.29 GB, peak=12.29 GB  (whole visible GPU(s), includes other processes)
+DRAM peak (process): 1.62 GB
+SSD reads: 734856 (avg 0.61 MB each, avg latency 0.17 ms)
+profile rows: prefill_target=120 prefill_mtp_process=3 prefill_total=123 decode=53064 decode_target=48240 decode_mtp_draft=3618 decode_mtp_process=1206
+profile requests: prefill_target=3 prefill_mtp_process=3 prefill_total=6 decode=6030 decode_target=1206 decode_mtp_draft=3618 decode_mtp_process=1206
