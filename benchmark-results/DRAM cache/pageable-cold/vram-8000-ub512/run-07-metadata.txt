@@ -1,0 +1,22 @@
+mode=pageable-cold
+host_cache=pageable
+preload=none
+vram_cache_mb=8000
+ubatch=512
+pp=1024
+tg=1024
+gpu_index=0
+cpu_list=0-31,64-95
+page_cache_before=22135021568 22135021024
+gpu_before=2026/07/29 05:59:58.965, 3 MiB, 45455 MiB, 0 %, 40, 64.46 W
+started=2026-07-29T05:59:58+00:00
+command=taskset -c 0-31\,64-95 env CUDA_VISIBLE_DEVICES=0 /home/haozhe.lou/llama.cpp.clean/build-moe/bin/llama-moe-bench --model /home/haozhe.lou/models/Qwen3.6-35B-A3B-UD-Q4_K_M.moe.gguf -ngl 99 -c 4096 --pp 1024 --tg 1024 --repeat 1 -ub 512 --moe-cache-vram-mb 8000 --moe-predictor lru --moe-host-cache pageable --moe-host-cache-preload none --moe-profile-csv /home/haozhe.lou/llama.cpp.clean/benchmark-results/DRAM\ cache/pageable-cold/vram-8000-ub512/run-07-profile.csv --moe-profile-summary /home/haozhe.lou/llama.cpp.clean/benchmark-results/DRAM\ cache/pageable-cold/vram-8000-ub512/run-07-summary.txt --token-trace /home/haozhe.lou/llama.cpp.clean/benchmark-results/DRAM\ cache/pageable-cold/vram-8000-ub512/run-07-tokens.csv 
+finished=2026-07-29T06:00:48+00:00
+exit_code=0
+page_cache_after=22135021568 22135021024
+gpu_after=2026/07/29 06:00:48.437, 3 MiB, 45455 MiB, 0 %, 42, 83.53 W
+peak_sample_rss_kib=17869644
+peak_sample_hwm_kib=17869644
+peak_sample_locked_kib=0
+peak_sample_n0_pages=4452250
+peak_sample_n1_pages=15705

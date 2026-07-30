@@ -7,6 +7,8 @@
 
 #include "moe-offload/runtime.h"
 #include "moe-offload/slot_pool.h"
+#include "moe-offload/host_cache.h"
+#include "page-cache.h"
 
 #include <algorithm>
 #include <chrono>
@@ -37,6 +39,7 @@
 struct bench_params {
     std::string model;
     std::string prompt;
+    std::string prompt_file;
     int n_prompt = 1024;
     int n_gen = 256;
     int n_repeat = 3;
@@ -45,6 +48,11 @@ struct bench_params {
     std::string moe_eamc_path;
     std::string moe_profile_csv;
     std::string moe_profile_summary;
+    std::string moe_host_cache = "off";
+    std::string moe_host_cache_preload = "none";
+    std::string page_cache_policy = "natural";
+    std::string token_trace;
+    std::string logits_bin;
     int n_gpu_layers = 99;
     int n_ctx = 4096;
     int n_ubatch = 0;
@@ -78,6 +86,7 @@ static bool parse_args(int argc, char ** argv, bench_params & p) {
         };
 
         if (value_for("--model", p.model)) {}
+        else if (value_for("--prompt-file", p.prompt_file)) {}
         else if (int_for("--pp", p.n_prompt)) {}
         else if (int_for("--tg", p.n_gen)) {}
         else if (int_for("--repeat", p.n_repeat)) {}
@@ -86,6 +95,11 @@ static bool parse_args(int argc, char ** argv, bench_params & p) {
         else if (value_for("--moe-eamc-path", p.moe_eamc_path)) {}
         else if (value_for("--moe-profile-csv", p.moe_profile_csv)) {}
         else if (value_for("--moe-profile-summary", p.moe_profile_summary)) {}
+        else if (value_for("--moe-host-cache", p.moe_host_cache)) {}
+        else if (value_for("--moe-host-cache-preload", p.moe_host_cache_preload)) {}
+        else if (value_for("--page-cache-policy", p.page_cache_policy)) {}
+        else if (value_for("--token-trace", p.token_trace)) {}
+        else if (value_for("--logits-bin", p.logits_bin)) {}
         else if (int_for("-ngl", p.n_gpu_layers)) {}
         else if (int_for("-c", p.n_ctx)) {}
         else if (int_for("-ub", p.n_ubatch)) {}
@@ -234,6 +248,33 @@ static uint64_t process_dram_peak_bytes() {
 #endif
 }
 
+struct process_memory_sample {
+    uint64_t rss_bytes = 0;
+    uint64_t hwm_bytes = 0;
+    uint64_t locked_bytes = 0;
+};
+
+static process_memory_sample process_memory_status() {
+    process_memory_sample sample;
+#if !defined(_WIN32)
+    std::ifstream in("/proc/self/status");
+    std::string line;
+    while (std::getline(in, line)) {
+        std::istringstream row(line);
+        std::string key;
+        uint64_t kib = 0;
+        std::string unit;
+        if (!(row >> key >> kib >> unit)) {
+            continue;
+        }
+        if (key == "VmRSS:") sample.rss_bytes = kib * 1024ull;
+        else if (key == "VmHWM:") sample.hwm_bytes = kib * 1024ull;
+        else if (key == "VmLck:") sample.locked_bytes = kib * 1024ull;
+    }
+#endif
+    return sample;
+}
+
 struct vram_sample {
     uint64_t used_bytes = 0;
     uint64_t total_bytes = 0;
@@ -358,20 +399,138 @@ static llama_token greedy_token(llama_context * ctx, int vocab_size) {
     return token;
 }
 
+static bool write_logits_record(std::ofstream & out, llama_context * ctx, int repeat, int step, int vocab_size) {
+    if (!out.is_open()) {
+        return true;
+    }
+    float * logits = llama_get_logits(ctx);
+    if (!logits) {
+        return false;
+    }
+    const int32_t header[] = {repeat, step, vocab_size};
+    out.write(reinterpret_cast<const char *>(header), sizeof(header));
+    out.write(reinterpret_cast<const char *>(logits), (std::streamsize) vocab_size * sizeof(float));
+    return out.good();
+}
+
+struct page_cache_runtime_metrics {
+    page_cache_prepare_result prepare;
+    page_cache_sample after_model_load;
+    page_cache_sample after_prefill;
+    page_cache_sample after_decode;
+    process_io_sample process_start;
+    process_io_sample after_prepare;
+    process_io_sample after_model_load_io;
+    process_io_sample after_prefill_io;
+    process_io_sample after_decode_io;
+    double model_init_ms = 0.0;
+    double process_start_to_prefill_end_ms = 0.0;
+};
+
+static std::string format_page_cache_metrics(const page_cache_runtime_metrics & metrics) {
+    auto read_delta = [](const process_io_sample & before, const process_io_sample & after) {
+        return process_io_delta(before.read_bytes, after.read_bytes);
+    };
+    auto rchar_delta = [](const process_io_sample & before, const process_io_sample & after) {
+        return process_io_delta(before.rchar, after.rchar);
+    };
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(4);
+    out << "Page cache policy: " << page_cache_policy_name(metrics.prepare.policy) << '\n';
+    out << "Page cache prepare: time=" << (double) metrics.prepare.elapsed_us / 1000.0
+        << " ms attempts=" << metrics.prepare.attempts
+        << " bytes_read=" << metrics.prepare.bytes_read << '\n';
+    out << "Page cache resident bytes: before=" << metrics.prepare.before.resident_bytes
+        << " after_prepare=" << metrics.prepare.after.resident_bytes
+        << " after_model_load=" << metrics.after_model_load.resident_bytes
+        << " after_prefill=" << metrics.after_prefill.resident_bytes
+        << " after_decode=" << metrics.after_decode.resident_bytes
+        << " total=" << metrics.prepare.after.total_bytes << '\n';
+    out << "Page cache resident pct: before=" << page_cache_resident_percent(metrics.prepare.before)
+        << " after_prepare=" << page_cache_resident_percent(metrics.prepare.after)
+        << " after_model_load=" << page_cache_resident_percent(metrics.after_model_load)
+        << " after_prefill=" << page_cache_resident_percent(metrics.after_prefill)
+        << " after_decode=" << page_cache_resident_percent(metrics.after_decode) << '\n';
+    out << "Page cache sample valid: before=" << (metrics.prepare.before.valid ? 1 : 0)
+        << " after_prepare=" << (metrics.prepare.after.valid ? 1 : 0)
+        << " after_model_load=" << (metrics.after_model_load.valid ? 1 : 0)
+        << " after_prefill=" << (metrics.after_prefill.valid ? 1 : 0)
+        << " after_decode=" << (metrics.after_decode.valid ? 1 : 0) << '\n';
+    out << "Process IO read_bytes: prepare=" << read_delta(metrics.process_start, metrics.after_prepare)
+        << " model_init=" << read_delta(metrics.after_prepare, metrics.after_model_load_io)
+        << " prefill=" << read_delta(metrics.after_model_load_io, metrics.after_prefill_io)
+        << " decode=" << read_delta(metrics.after_prefill_io, metrics.after_decode_io)
+        << " total=" << read_delta(metrics.process_start, metrics.after_decode_io) << '\n';
+    out << "Process IO rchar: prepare=" << rchar_delta(metrics.process_start, metrics.after_prepare)
+        << " model_init=" << rchar_delta(metrics.after_prepare, metrics.after_model_load_io)
+        << " prefill=" << rchar_delta(metrics.after_model_load_io, metrics.after_prefill_io)
+        << " decode=" << rchar_delta(metrics.after_prefill_io, metrics.after_decode_io)
+        << " total=" << rchar_delta(metrics.process_start, metrics.after_decode_io) << '\n';
+    out << "Process IO sample valid: start=" << (metrics.process_start.valid ? 1 : 0)
+        << " after_prepare=" << (metrics.after_prepare.valid ? 1 : 0)
+        << " after_model_load=" << (metrics.after_model_load_io.valid ? 1 : 0)
+        << " after_prefill=" << (metrics.after_prefill_io.valid ? 1 : 0)
+        << " after_decode=" << (metrics.after_decode_io.valid ? 1 : 0) << '\n';
+    out << "Page cache timing: prepare_ms=" << (double) metrics.prepare.elapsed_us / 1000.0
+        << " model_init_ms=" << metrics.model_init_ms
+        << " process_start_to_prefill_end_ms=" << metrics.process_start_to_prefill_end_ms << '\n';
+    return out.str();
+}
+
 int main(int argc, char ** argv) {
     bench_params p;
     if (!parse_args(argc, argv, p)) {
-        fprintf(stderr, "Usage: llama-moe-bench --model <path> --pp N --tg N [--repeat N] [--moe-cache-vram-mb MB] [--moe-predictor lru|eamc] [--moe-eamc-path PATH] [--moe-profile-csv PATH] [--moe-profile-summary PATH] [--moe-reset-cache-between-repeats] [--moe-warm-cache] [--moe-hot-start] [-ub N]\n");
+        fprintf(stderr, "Usage: llama-moe-bench --model <path> [--prompt-file PATH | -p TEXT] --pp N --tg N [--repeat N] [--moe-cache-vram-mb MB] [--moe-predictor lru|eamc] [--moe-eamc-path PATH] [--moe-profile-csv PATH] [--moe-profile-summary PATH] [--moe-host-cache off|pageable|pinned] [--moe-host-cache-preload none|all] [--page-cache-policy natural|cold|hot] [--token-trace PATH] [--logits-bin PATH] [--moe-reset-cache-between-repeats] [--moe-warm-cache] [--moe-hot-start] [-ub N]\n");
+        return 1;
+    }
+    if ((p.moe_host_cache != "off" && p.moe_host_cache != "pageable" && p.moe_host_cache != "pinned") ||
+            (p.moe_host_cache_preload != "none" && p.moe_host_cache_preload != "all") ||
+            (p.moe_host_cache == "off" && p.moe_host_cache_preload != "none")) {
+        fprintf(stderr, "invalid host cache configuration\n");
+        return 1;
+    }
+    page_cache_policy cache_policy;
+    if (!page_cache_policy_from_string(p.page_cache_policy, cache_policy)) {
+        fprintf(stderr, "invalid --page-cache-policy value: %s\n", p.page_cache_policy.c_str());
         return 1;
     }
 
+    if (!p.prompt.empty() && !p.prompt_file.empty()) {
+        fprintf(stderr, "use only one of --prompt-file and -p\n");
+        return 1;
+    }
     std::string prompt_text = p.prompt;
+    if (!p.prompt_file.empty()) {
+        std::ifstream prompt_stream(p.prompt_file, std::ios::in | std::ios::binary);
+        if (!prompt_stream) {
+            fprintf(stderr, "failed to open prompt file: %s\n", p.prompt_file.c_str());
+            return 1;
+        }
+        std::ostringstream contents;
+        contents << prompt_stream.rdbuf();
+        prompt_text = contents.str();
+        if (!prompt_stream.good() && !prompt_stream.eof()) {
+            fprintf(stderr, "failed to read prompt file: %s\n", p.prompt_file.c_str());
+            return 1;
+        }
+    }
     if (prompt_text.empty()) {
         prompt_text.reserve((size_t) p.n_prompt * 8);
         for (int i = 0; i < p.n_prompt; ++i) {
             prompt_text += "Hello. ";
         }
     }
+
+    const double process_start_ms = now_ms();
+    page_cache_runtime_metrics page_cache_metrics;
+    page_cache_metrics.process_start = process_io_current();
+    if (!page_cache_prepare(p.model, cache_policy, page_cache_metrics.prepare)) {
+        fprintf(stderr, "page-cache preparation failed for %s: %s\n",
+                p.model.c_str(), page_cache_metrics.prepare.error.c_str());
+        return 2;
+    }
+    page_cache_metrics.after_prepare = process_io_current();
+    const double model_init_begin_ms = now_ms();
 
     llama_backend_init();
     vram_sample vram_baseline = sample_vram();
@@ -403,6 +562,8 @@ int main(int argc, char ** argv) {
     // format. llama-moe-bench owns --moe-profile-summary so it can write the
     // full §4.7 benchmark report after all repeats are complete.
     model_params.moe_profile_summary = nullptr;
+    model_params.moe_host_cache = p.moe_host_cache.c_str();
+    model_params.moe_host_cache_preload = p.moe_host_cache_preload.c_str();
 
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx = p.n_ctx;
@@ -438,16 +599,27 @@ int main(int argc, char ** argv) {
 
     const llama_vocab * vocab = llama_model_get_vocab(model);
     const int vocab_size = llama_vocab_n_tokens(vocab);
-    const int n_tokens_max = p.n_prompt + 128;
-    std::vector<llama_token> prompt_tokens((size_t) n_tokens_max);
+    const int required_prompt_tokens = -llama_tokenize(vocab,
+            prompt_text.c_str(), (int) prompt_text.size(),
+            nullptr, 0, true, true);
+    if (required_prompt_tokens <= 0) {
+        fprintf(stderr, "failed to size prompt tokenization\n");
+        llama_free(ctx);
+        llama_model_free(model);
+        llama_backend_free();
+        return 1;
+    }
+    std::vector<llama_token> prompt_tokens((size_t) required_prompt_tokens);
     int n_prompt_tokens = llama_tokenize(vocab,
             prompt_text.c_str(), (int) prompt_text.size(),
-            prompt_tokens.data(), n_tokens_max, true, true);
+            prompt_tokens.data(), (int) prompt_tokens.size(), true, true);
     if (n_prompt_tokens < 0) {
-        n_prompt_tokens = p.n_prompt;
-        for (int i = 0; i < n_prompt_tokens; ++i) {
-            prompt_tokens[i] = (i % 32000) + 1;
-        }
+        fprintf(stderr, "failed to tokenize prompt: required=%d result=%d\n",
+                required_prompt_tokens, n_prompt_tokens);
+        llama_free(ctx);
+        llama_model_free(model);
+        llama_backend_free();
+        return 1;
     }
     if (n_prompt_tokens > p.n_prompt) {
         n_prompt_tokens = p.n_prompt;
@@ -473,11 +645,17 @@ int main(int argc, char ** argv) {
         }
     }
 
+    page_cache_metrics.model_init_ms = now_ms() - model_init_begin_ms;
+    page_cache_metrics.after_model_load = page_cache_residency(p.model);
+    page_cache_metrics.after_model_load_io = process_io_current();
+
     std::vector<double> ttft_ms;
     std::vector<double> cold_ttft_ms;
     std::vector<double> warm_ttft_ms;
     std::vector<double> tpot_ms;
     std::vector<double> total_ms;
+    uint64_t host_ready_bytes_after_prefill = 0;
+    uint64_t host_ready_bytes_after_decode = 0;
     ttft_ms.reserve((size_t) p.n_repeat);
     cold_ttft_ms.reserve((size_t) p.n_repeat);
     warm_ttft_ms.reserve((size_t) p.n_repeat);
@@ -485,6 +663,27 @@ int main(int argc, char ** argv) {
     total_ms.reserve((size_t) p.n_repeat);
 
     int exit_code = 0;
+    std::ofstream token_trace;
+    if (!p.token_trace.empty()) {
+        token_trace.open(p.token_trace, std::ios::out | std::ios::trunc);
+        if (!token_trace) {
+            fprintf(stderr, "failed to open token trace: %s\n", p.token_trace.c_str());
+            exit_code = 1;
+        } else {
+            token_trace << "repeat,step,token\n";
+        }
+    }
+    std::ofstream logits_bin;
+    if (!p.logits_bin.empty()) {
+        logits_bin.open(p.logits_bin, std::ios::out | std::ios::binary | std::ios::trunc);
+        if (!logits_bin) {
+            fprintf(stderr, "failed to open logits output: %s\n", p.logits_bin.c_str());
+            exit_code = 1;
+        } else {
+            const char magic[8] = {'M', 'O', 'E', 'L', 'O', 'G', '1', '\0'};
+            logits_bin.write(magic, sizeof(magic));
+        }
+    }
 
     auto average_or_zero = [](const std::vector<double> & values) -> double {
         if (values.empty()) {
@@ -527,9 +726,29 @@ int main(int argc, char ** argv) {
         summary_ctx.vram_device_baseline_bytes = vram_device_baseline_bytes;
         summary_ctx.vram_device_peak_bytes = vram_device_peak_bytes;
         summary_ctx.dram_peak_bytes = dram_peak_bytes;
+        const process_memory_sample mem = process_memory_status();
+        const llama_moe::host_cache_snapshot host = llama_moe::host_cache_get_snapshot();
+        summary_ctx.dram_rss_bytes = mem.rss_bytes;
+        summary_ctx.dram_locked_bytes = mem.locked_bytes;
+        summary_ctx.host_cache_mode = host.mode;
+        summary_ctx.host_cache_preload = host.preload;
+        summary_ctx.host_cache_capacity_bytes = host.capacity_bytes;
+        summary_ctx.host_cache_data_bytes = host.data_bytes;
+        summary_ctx.host_cache_ready_blobs = host.ready_blobs;
+        summary_ctx.host_cache_total_blobs = host.total_blobs;
+        summary_ctx.host_cache_ready_bytes_after_prefill = host_ready_bytes_after_prefill;
+        summary_ctx.host_cache_ready_bytes_after_decode = host_ready_bytes_after_decode;
+        summary_ctx.host_cache_preload_alloc_us = host.preload_alloc_us;
+        summary_ctx.host_cache_preload_read_us = host.preload_read_us;
+        summary_ctx.host_cache_preload_total_us = host.preload_total_us;
+        summary_ctx.host_cache_preload_bytes = host.preload_bytes;
+        summary_ctx.host_cache_verified_blobs = host.verified_blobs;
+        summary_ctx.host_cache_verification_failures = host.verification_failures;
+        summary_ctx.service_cold_start_ttft_ms = summary_ctx.ttft_ms + (double) host.preload_total_us / 1000.0;
 
         const llama_moe::profile_snapshot profile = llama_moe::get_profile_snapshot();
-        const std::string summary = llama_moe::format_summary(summary_ctx, profile);
+        std::string summary = llama_moe::format_summary(summary_ctx, profile);
+        summary += format_page_cache_metrics(page_cache_metrics);
 
         if (print_stdout) {
             fputc('\n', stdout);
@@ -573,7 +792,7 @@ int main(int argc, char ** argv) {
         llama_moe::reset_profile();
     }
 
-    for (int rep = 0; rep < p.n_repeat; ++rep) {
+    for (int rep = 0; exit_code == 0 && rep < p.n_repeat; ++rep) {
         llama_memory_clear(llama_get_memory(ctx), true);
         if (p.moe_reset_cache_between_repeats) {
             llama_moe::slot_pool_reset_cache();
@@ -591,7 +810,13 @@ int main(int argc, char ** argv) {
         update_vram_peak();
         dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
         const double t1 = now_ms();
+        host_ready_bytes_after_prefill = llama_moe::host_cache_get_snapshot().ready_bytes;
         const double measured_ttft_ms = t1 - t0;
+        const double page_cache_sample_begin_ms = now_ms();
+        page_cache_metrics.after_prefill = page_cache_residency(p.model);
+        page_cache_metrics.after_prefill_io = process_io_current();
+        page_cache_metrics.process_start_to_prefill_end_ms = t1 - process_start_ms;
+        const double page_cache_sample_ms = now_ms() - page_cache_sample_begin_ms;
         ttft_ms.push_back(measured_ttft_ms);
         const bool measured_prefill_warm = !p.moe_reset_cache_between_repeats && (p.moe_warm_cache || rep > 0);
         if (measured_prefill_warm) {
@@ -601,7 +826,13 @@ int main(int argc, char ** argv) {
         }
         write_summary(false);
 
+        if (!write_logits_record(logits_bin, ctx, rep, 0, vocab_size)) {
+            fprintf(stderr, "failed to write prefill logits\n");
+            exit_code = 1;
+            break;
+        }
         llama_token token = greedy_token(ctx, vocab_size);
+        if (token_trace) token_trace << rep << ',' << 0 << ',' << token << '\n';
         for (int gen = 0; gen < p.n_gen; ++gen) {
             batch = llama_batch_get_one(&token, 1);
             llama_moe::set_profile_request_context(rep, gen + 1, "decode");
@@ -610,14 +841,23 @@ int main(int argc, char ** argv) {
                 exit_code = 1;
                 break;
             }
+            if (!write_logits_record(logits_bin, ctx, rep, gen + 1, vocab_size)) {
+                fprintf(stderr, "failed to write decode logits at gen %d\n", gen);
+                exit_code = 1;
+                break;
+            }
             token = greedy_token(ctx, vocab_size);
+            if (token_trace) token_trace << rep << ',' << gen + 1 << ',' << token << '\n';
             update_vram_peak();
             dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
         }
 
         const double t2 = now_ms();
-        tpot_ms.push_back((t2 - t1) / p.n_gen);
-        total_ms.push_back(t2 - t0);
+        host_ready_bytes_after_decode = llama_moe::host_cache_get_snapshot().ready_bytes;
+        page_cache_metrics.after_decode = page_cache_residency(p.model);
+        page_cache_metrics.after_decode_io = process_io_current();
+        tpot_ms.push_back((t2 - t1 - page_cache_sample_ms) / p.n_gen);
+        total_ms.push_back(t2 - t0 - page_cache_sample_ms);
         update_vram_peak();
         dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
         write_summary(false);
@@ -625,6 +865,10 @@ int main(int argc, char ** argv) {
 
     if (!llama_moe::flush_predictor()) {
         fprintf(stderr, "[moe-bench] ERROR: failed to flush MoE predictor state\n");
+        exit_code = 1;
+    }
+    if (!llama_moe::host_cache_verify_ready(256)) {
+        fprintf(stderr, "[moe-bench] ERROR: host cache verification failed\n");
         exit_code = 1;
     }
 

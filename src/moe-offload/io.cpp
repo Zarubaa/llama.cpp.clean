@@ -1,5 +1,8 @@
 #include "io.h"
 
+#include "host_cache.h"
+#include "loader.h"
+
 #include "ggml-backend.h"
 
 #include <cstdio>
@@ -37,19 +40,39 @@ struct buffer_pool {
     std::mutex mutex;
     std::condition_variable cv;
 
-    void init(size_t size, int count) {
+    bool init(size_t size, int count) {
         buf_size = size;
-        // Try pinned host memory first (overlaps with CUDA async copies).
-        // Fall back to malloc on CPU-only builds or if pinned alloc fails.
+        pinned = false;
+        if (count <= 0) {
+            return true;
+        }
         for (int i = 0; i < count; ++i) {
             void * p = io_pinned_alloc(size);
-            if (p) {
-                pinned = true;
-            } else {
-                p = malloc(size);
+            if (!p) {
+                for (void * allocated : free_list) {
+                    io_pinned_free(allocated);
+                }
+                free_list.clear();
+                break;
             }
             free_list.push_back(p);
         }
+        if ((int) free_list.size() == count) {
+            pinned = true;
+            return true;
+        }
+        for (int i = 0; i < count; ++i) {
+            void * p = malloc(size);
+            if (!p) {
+                for (void * allocated : free_list) {
+                    free(allocated);
+                }
+                free_list.clear();
+                return false;
+            }
+            free_list.push_back(p);
+        }
+        return true;
     }
 
     void * acquire() {
@@ -152,6 +175,8 @@ struct io_worker {
     buffer_pool   pool;
     FILE *        fp = nullptr;
     std::atomic<int> outstanding{0};
+    bool use_host_cache = false;
+    bool pinned_host_cache = false;
 
     void run() {
         io_request req;
@@ -165,31 +190,79 @@ struct io_worker {
             if (stop_flag.load(std::memory_order_relaxed) && queue.empty()) break;
 
             while (queue.pop(req)) {
-                const auto read_start = std::chrono::steady_clock::now();
-                int rc = moe_io_fseek(fp, (int64_t) req.file_offset, SEEK_SET);
-                if (rc != 0) {
-                    req.ok       = false;
-                    req.io_error = errno;
-                    req.bytes_read = 0;
-                    fprintf(stderr, "[moe-io] seek to %llu failed\n",
-                            (unsigned long long) req.file_offset);
-                    done.push(req);
-                    outstanding.fetch_sub(1, std::memory_order_release);
-                    continue;
+                req.host_src = nullptr;
+                req.host_cache_hit = false;
+                req.host_cache_miss = false;
+                req.host_cache_lookup_us = 0;
+                req.host_cache_fill_us = 0;
+                req.host_memcpy_us = 0;
+                req.host_memcpy_bytes = 0;
+
+                if (use_host_cache) {
+                    host_cache_access access;
+                    if (!host_cache_get_or_fill(
+                            (uint32_t) req.layer,
+                            (uint32_t) req.expert,
+                            (expert_kind) req.kind,
+                            fp,
+                            access)) {
+                        req.ok = false;
+                        req.io_error = errno;
+                        done.push(req);
+                        outstanding.fetch_sub(1, std::memory_order_release);
+                        continue;
+                    }
+                    req.host_cache_hit = access.hit;
+                    req.host_cache_miss = access.miss;
+                    req.host_cache_lookup_us = access.lookup_us;
+                    req.host_cache_fill_us = access.fill_us;
+                    req.ssd_read_us = access.source_read_us;
+                    req.bytes_read = access.source_bytes;
+                    req.host_src = access.data;
+                    if (!pinned_host_cache) {
+                        if (!req.pinned_buf) {
+                            req.ok = false;
+                            req.io_error = EINVAL;
+                            done.push(req);
+                            outstanding.fetch_sub(1, std::memory_order_release);
+                            continue;
+                        }
+                        const auto copy_begin = std::chrono::steady_clock::now();
+                        memcpy(req.pinned_buf, access.data, req.blob_size);
+                        const auto copy_end = std::chrono::steady_clock::now();
+                        req.host_memcpy_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                copy_end - copy_begin).count();
+                        req.host_memcpy_bytes = req.blob_size;
+                        req.host_src = req.pinned_buf;
+                    }
+                } else {
+                    const auto read_start = std::chrono::steady_clock::now();
+                    int rc = moe_io_fseek(fp, (int64_t) req.file_offset, SEEK_SET);
+                    if (rc != 0) {
+                        req.ok       = false;
+                        req.io_error = errno;
+                        req.bytes_read = 0;
+                        fprintf(stderr, "[moe-io] seek to %llu failed\n",
+                                (unsigned long long) req.file_offset);
+                        done.push(req);
+                        outstanding.fetch_sub(1, std::memory_order_release);
+                        continue;
+                    }
+                    size_t got = fread(req.pinned_buf, 1, req.blob_size, fp);
+                    req.bytes_read = got;
+                    if (got != req.blob_size) {
+                        req.ok       = false;
+                        req.io_error = ferror(fp) ? errno : 0;
+                        fprintf(stderr, "[moe-io] short read: got %zu of %zu\n", got, req.blob_size);
+                        done.push(req);
+                        outstanding.fetch_sub(1, std::memory_order_release);
+                        continue;
+                    }
+                    const auto read_end = std::chrono::steady_clock::now();
+                    req.ssd_read_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            read_end - read_start).count();
+                    req.host_src = req.pinned_buf;
                 }
-                size_t got = fread(req.pinned_buf, 1, req.blob_size, fp);
-                req.bytes_read = got;
-                if (got != req.blob_size) {
-                    req.ok       = false;
-                    req.io_error = ferror(fp) ? errno : 0;
-                    fprintf(stderr, "[moe-io] short read: got %zu of %zu\n", got, req.blob_size);
-                    done.push(req);
-                    outstanding.fetch_sub(1, std::memory_order_release);
-                    continue;
-                }
-                const auto read_end = std::chrono::steady_clock::now();
-                req.ssd_read_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                        read_end - read_start).count();
 
                 // Phase H: issue async H2D into the slot's GPU address. When
                 // CUDA is unavailable or the call fails, leave h2d_event null
@@ -201,7 +274,7 @@ struct io_worker {
                 if (req.h2d && req.gpu_dst) {
                     void * ev_begin = nullptr;
                     void * ev_end   = nullptr;
-                    if (io_h2d_async_timed(req.gpu_dst, req.pinned_buf, req.blob_size,
+                    if (io_h2d_async_timed(req.gpu_dst, req.host_src, req.blob_size,
                                            &ev_begin, &ev_end)) {
                         req.h2d_begin_event = ev_begin;
                         req.h2d_event       = ev_end;
@@ -239,6 +312,8 @@ struct io_worker {
         if (thread.joinable()) thread.join();
         if (fp) { fclose(fp); fp = nullptr; }
         pool.shutdown();
+        use_host_cache = false;
+        pinned_host_cache = false;
     }
 };
 
@@ -249,7 +324,12 @@ io_worker g_worker;
 // ── Public API ─────────────────────────────────────────────────────────
 
 bool io_init(const char * source_path, size_t blob_size_max, int n_buffers) {
-    g_worker.pool.init(blob_size_max, n_buffers);
+    io_shutdown();
+    g_worker.use_host_cache = host_cache_enabled();
+    g_worker.pinned_host_cache = host_cache_is_pinned();
+    if (!g_worker.pool.init(blob_size_max, n_buffers)) {
+        return false;
+    }
     g_worker.start(source_path);
     return (g_worker.fp != nullptr);
 }
@@ -290,6 +370,10 @@ std::vector<io_request> io_drain_completed() {
 
 int io_outstanding() {
     return g_worker.outstanding.load(std::memory_order_acquire);
+}
+
+bool io_initialized() {
+    return g_worker.fp != nullptr && g_worker.thread.joinable();
 }
 
 // ---------------------------------------------------------------------------

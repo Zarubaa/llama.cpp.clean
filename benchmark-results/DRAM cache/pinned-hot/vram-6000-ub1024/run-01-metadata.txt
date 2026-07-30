@@ -1,0 +1,22 @@
+mode=pinned-hot
+host_cache=pinned
+preload=all
+vram_cache_mb=6000
+ubatch=1024
+pp=1024
+tg=1024
+gpu_index=0
+cpu_list=0-31,64-95
+page_cache_before=22135021568 22135021024
+gpu_before=2026/07/29 05:11:34.772, 3 MiB, 45455 MiB, 0 %, 42, 64.92 W
+started=2026-07-29T05:11:34+00:00
+command=taskset -c 0-31\,64-95 env CUDA_VISIBLE_DEVICES=0 /home/haozhe.lou/llama.cpp.clean/build-moe/bin/llama-moe-bench --model /home/haozhe.lou/models/Qwen3.6-35B-A3B-UD-Q4_K_M.moe.gguf -ngl 99 -c 4096 --pp 1024 --tg 1024 --repeat 1 -ub 1024 --moe-cache-vram-mb 6000 --moe-predictor lru --moe-host-cache pinned --moe-host-cache-preload all --moe-profile-csv /home/haozhe.lou/llama.cpp.clean/benchmark-results/DRAM\ cache/pinned-hot/vram-6000-ub1024/run-01-profile.csv --moe-profile-summary /home/haozhe.lou/llama.cpp.clean/benchmark-results/DRAM\ cache/pinned-hot/vram-6000-ub1024/run-01-summary.txt --token-trace /home/haozhe.lou/llama.cpp.clean/benchmark-results/DRAM\ cache/pinned-hot/vram-6000-ub1024/run-01-tokens.csv 
+finished=2026-07-29T05:12:16+00:00
+exit_code=0
+page_cache_after=22135021568 22135021024
+gpu_after=2026/07/29 05:12:16.277, 3 MiB, 45455 MiB, 0 %, 43, 84.84 W
+peak_sample_rss_kib=20500440
+peak_sample_hwm_kib=20500440
+peak_sample_locked_kib=0
+peak_sample_n0_pages=5109390
+peak_sample_n1_pages=15739

@@ -1,0 +1,9 @@
+validation=pass
+token_sha256=cb3a24165915c8e299f38ea7a7e9cd2fe620a57eb54870856d1b4e29388c720b
+route_trace_sha256=2dbb2dc9685f6e1962605319a577d8c09bd113b59e0e5662e34487d0a6f01c90
+profile_layer_rows=41040
+vram_misses=84262
+h2d_bytes=161042030592
+host_memcpy_bytes=0
+ssd_bytes=0
+ssd_reads=0

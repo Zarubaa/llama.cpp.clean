@@ -1,0 +1,3 @@
+device	reads_completed_before	sectors_read_before	reads_completed_after	sectors_read_after	reads_completed_delta	sectors_read_delta
+253:0	13911372	2432614754	13911418	2432615434	46	680
+sdb3	15042879	2432834150	15042910	2432834830	31	680

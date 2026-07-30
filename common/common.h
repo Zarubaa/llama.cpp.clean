@@ -591,6 +591,8 @@ struct common_params {
     std::string moe_eamc_path;
     std::string moe_profile_csv;
     std::string moe_profile_summary;
+    std::string moe_host_cache        = "off";
+    std::string moe_host_cache_preload = "none";
     bool        moe_oracle             = false;
 #endif
 

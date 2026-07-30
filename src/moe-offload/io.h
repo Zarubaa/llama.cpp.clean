@@ -34,11 +34,14 @@ namespace llama_moe {
 // ---------------------------------------------------------------------------
 
 struct io_request {
+    uint64_t request_id;
     int      layer;        // logical MoE layer index
     int32_t  expert;       // expert id (0..n_expert-1)
     int      kind;         // EXPERT_GATE / EXPERT_UP / EXPERT_DOWN
     int32_t  slot;         // destination slot index
     void *   pinned_buf;   // pinned host buffer (owned by pool)
+    bool     owns_pinned_buf;
+    const void * host_src;
     size_t   blob_size;    // bytes to read
     uint64_t file_offset;  // absolute byte offset in .moe.gguf
     char *   gpu_dst;      // GPU destination address (slot_tensor->data + slot * nb[2])
@@ -50,6 +53,12 @@ struct io_request {
     // cudaEventElapsedTime(begin, h2d_event) for real h2d_us.
     void *   h2d_begin_event;
     int64_t  ssd_read_us;  // worker-measured fread duration in microseconds
+    bool     host_cache_hit;
+    bool     host_cache_miss;
+    int64_t  host_cache_lookup_us;
+    int64_t  host_cache_fill_us;
+    int64_t  host_memcpy_us;
+    uint64_t host_memcpy_bytes;
     bool     ok = true;     // false when seek/read failed; caller still owns pinned_buf
     size_t   bytes_read = 0;
     int      io_error = 0;
@@ -87,6 +96,7 @@ std::vector<io_request> io_drain_completed();
 
 // Number of outstanding (submitted but not yet waited) requests.
 int io_outstanding();
+bool io_initialized();
 
 // ---------------------------------------------------------------------------
 // CUDA-backed pinned staging + async H2D + event plumbing (Phase G).

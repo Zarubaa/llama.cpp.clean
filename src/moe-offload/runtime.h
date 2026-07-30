@@ -20,6 +20,8 @@ struct runtime_options {
     std::string eamc_path;
     std::string profile_csv;
     std::string profile_summary;
+    std::string host_cache = "off";
+    std::string host_cache_preload = "none";
     bool oracle = false;
 };
 

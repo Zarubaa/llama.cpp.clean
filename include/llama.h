@@ -325,6 +325,8 @@ extern "C" {
         const char * moe_eamc_path;
         const char * moe_profile_csv;
         const char * moe_profile_summary;
+        const char * moe_host_cache;
+        const char * moe_host_cache_preload;
         uint64_t     moe_cache_vram_mb;
         float        moe_cache_vram_frac;
     #endif

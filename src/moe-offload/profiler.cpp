@@ -39,6 +39,14 @@ void append_io_breakdown(std::ostringstream & out, const char * label, const pro
         << us_per_token_ms(stats.ssd_read_us, tokens, repeats) << " ms\n";
     out << "  h2d            " << std::setw(8)
         << us_per_token_ms(stats.h2d_us, tokens, repeats) << " ms\n";
+    out << "  host_lookup    " << std::setw(8)
+        << us_per_token_ms(stats.host_cache_lookup_us, tokens, repeats) << " ms\n";
+    out << "  host_fill      " << std::setw(8)
+        << us_per_token_ms(stats.host_cache_fill_us, tokens, repeats) << " ms\n";
+    out << "  host_memcpy    " << std::setw(8)
+        << us_per_token_ms(stats.host_memcpy_us, tokens, repeats) << " ms\n";
+    out << "  staging_wait   " << std::setw(8)
+        << us_per_token_ms(stats.pinned_staging_wait_us, tokens, repeats) << " ms\n";
     out << "  gpu_compute    " << std::setw(8)
         << us_per_token_ms(stats.compute_us, tokens, repeats) << " ms\n";
     out << "  stall (overlap loss) " << std::setw(8)
@@ -137,6 +145,16 @@ void profiler::record(const profile_row & row) {
     stats.ssd_bytes += row.ssd_bytes;
     stats.ssd_reads += row.ssd_reads;
     stats.ssd_read_us += row.ssd_read_us;
+    stats.host_cache_hits += row.host_cache_hits;
+    stats.host_cache_misses += row.host_cache_misses;
+    stats.host_cache_hit_bytes += row.host_cache_hit_bytes;
+    stats.host_cache_miss_bytes += row.host_cache_miss_bytes;
+    stats.host_cache_lookup_us += row.host_cache_lookup_us;
+    stats.host_cache_fill_us += row.host_cache_fill_us;
+    stats.host_memcpy_us += row.host_memcpy_us;
+    stats.host_memcpy_bytes += row.host_memcpy_bytes;
+    stats.h2d_bytes += row.h2d_bytes;
+    stats.pinned_staging_wait_us += row.pinned_staging_wait_us;
     stats.h2d_us += row.h2d_us;
     stats.compute_us += row.compute_us;
     stats.stall_us += row.stall_us;
@@ -204,7 +222,20 @@ void profiler::record(const profile_row & row) {
             << row.k_empty_admit << ','
             << row.k_victim_admit << ','
             << row.k_scratch << ','
-            << row.route_rank_us << '\n';
+            << row.route_rank_us << ','
+            << row.host_cache_hits << ','
+            << row.host_cache_misses << ','
+            << row.host_cache_hit_bytes << ','
+            << row.host_cache_miss_bytes << ','
+            << row.host_cache_lookup_us << ','
+            << row.host_cache_fill_us << ','
+            << row.host_memcpy_us << ','
+            << row.host_memcpy_bytes << ','
+            << row.h2d_bytes << ','
+            << row.pinned_staging_wait_us << ','
+            << row.ssd_bytes << ','
+            << row.ssd_reads << ','
+            << row.route_hash << '\n';
     }
 }
 
@@ -259,6 +290,19 @@ void profiler::record_request(const profile_request_row & row) {
             << 0 << ','
             << 0 << ','
             << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
             << 0 << '\n';
     }
 }
@@ -291,6 +335,11 @@ std::string profiler::summary() const {
     out << "ssd_bytes: " << stats.ssd_bytes << '\n';
     out << "ssd_reads: " << stats.ssd_reads << '\n';
     out << "ssd_read_us: " << stats.ssd_read_us << '\n';
+    out << "host_cache_hits: " << stats.host_cache_hits << '\n';
+    out << "host_cache_misses: " << stats.host_cache_misses << '\n';
+    out << "host_cache_lookup_us: " << stats.host_cache_lookup_us << '\n';
+    out << "host_cache_fill_us: " << stats.host_cache_fill_us << '\n';
+    out << "host_memcpy_us: " << stats.host_memcpy_us << '\n';
     out << "h2d_us: " << stats.h2d_us << '\n';
     out << "compute_us: " << stats.compute_us << '\n';
     out << "stall_us: " << stats.stall_us << '\n';
@@ -400,6 +449,7 @@ std::string format_summary(
     out << "SSD bytes read (decode): " << std::setprecision(2) << bytes_to_gib(profile.decode.ssd_bytes)
         << " GB  (avg " << bytes_to_mib(decode_bytes_per_token) << " MB/token)\n";
     out << "TTFT: " << std::setprecision(1) << ctx.ttft_ms << " ms\n";
+    out << "service cold-start TTFT: " << std::setprecision(1) << ctx.service_cold_start_ttft_ms << " ms\n";
     if (ctx.cold_prefill_count > 0 || ctx.warm_prefill_count > 0) {
         out << "TTFT cold: " << std::setprecision(1) << ctx.cold_ttft_ms
             << " ms  (n=" << ctx.cold_prefill_count << ")\n";
@@ -439,6 +489,31 @@ std::string format_summary(
     if (ctx.dram_peak_bytes > 0) {
         out << "DRAM peak (process): " << bytes_to_gib(ctx.dram_peak_bytes) << " GB\n";
     }
+    out << "DRAM RSS (process): " << bytes_to_gib(ctx.dram_rss_bytes) << " GB\n";
+    out << "DRAM locked (process): " << bytes_to_gib(ctx.dram_locked_bytes) << " GB\n";
+    const uint64_t host_accesses = profile.prefill.host_cache_hits + profile.prefill.host_cache_misses +
+        profile.decode.host_cache_hits + profile.decode.host_cache_misses;
+    const uint64_t host_hits = profile.prefill.host_cache_hits + profile.decode.host_cache_hits;
+    const double host_hit_pct = host_accesses == 0 ? 0.0 : 100.0 * (double) host_hits / (double) host_accesses;
+    out << "Host cache: mode=" << ctx.host_cache_mode
+        << " preload=" << ctx.host_cache_preload
+        << " capacity=" << bytes_to_gib(ctx.host_cache_capacity_bytes) << " GB"
+        << " data=" << bytes_to_gib(ctx.host_cache_data_bytes) << " GB\n";
+    out << "Host cache ready: blobs=" << ctx.host_cache_ready_blobs << "/" << ctx.host_cache_total_blobs
+        << " after_prefill=" << bytes_to_gib(ctx.host_cache_ready_bytes_after_prefill) << " GB"
+        << " after_decode=" << bytes_to_gib(ctx.host_cache_ready_bytes_after_decode) << " GB\n";
+    out << "Host cache access: hits=" << host_hits
+        << " misses=" << (host_accesses - host_hits)
+        << " hit_rate=" << host_hit_pct << "%\n";
+    out << "Host cache preload: alloc=" << (double) ctx.host_cache_preload_alloc_us / 1000.0
+        << " ms read=" << (double) ctx.host_cache_preload_read_us / 1000.0
+        << " ms total=" << (double) ctx.host_cache_preload_total_us / 1000.0
+        << " ms bytes=" << bytes_to_gib(ctx.host_cache_preload_bytes) << " GB\n";
+    out << "Host cache verification: verified=" << ctx.host_cache_verified_blobs
+        << " failures=" << ctx.host_cache_verification_failures << "\n";
+    out << "Host cache transfer: memcpy=" << bytes_to_gib(profile.prefill.host_memcpy_bytes + profile.decode.host_memcpy_bytes)
+        << " GB h2d=" << bytes_to_gib(profile.prefill.h2d_bytes + profile.decode.h2d_bytes) << " GB\n";
+    out << "Source bytes read (total): " << bytes_to_gib(profile.prefill.ssd_bytes + profile.decode.ssd_bytes) << " GB\n";
     out << "SSD reads: " << profile.decode.ssd_reads
         << " (avg " << avg_read_mib << " MB each, avg latency " << avg_read_latency_ms << " ms)\n";
     out << "profile rows: prefill=" << profile.prefill.rows << " decode=" << profile.decode.rows << '\n';
@@ -454,6 +529,16 @@ profile_phase_stats profiler::total() const {
     stats.ssd_bytes = prefill_stats.ssd_bytes + decode_stats.ssd_bytes;
     stats.ssd_reads = prefill_stats.ssd_reads + decode_stats.ssd_reads;
     stats.ssd_read_us = prefill_stats.ssd_read_us + decode_stats.ssd_read_us;
+    stats.host_cache_hits = prefill_stats.host_cache_hits + decode_stats.host_cache_hits;
+    stats.host_cache_misses = prefill_stats.host_cache_misses + decode_stats.host_cache_misses;
+    stats.host_cache_hit_bytes = prefill_stats.host_cache_hit_bytes + decode_stats.host_cache_hit_bytes;
+    stats.host_cache_miss_bytes = prefill_stats.host_cache_miss_bytes + decode_stats.host_cache_miss_bytes;
+    stats.host_cache_lookup_us = prefill_stats.host_cache_lookup_us + decode_stats.host_cache_lookup_us;
+    stats.host_cache_fill_us = prefill_stats.host_cache_fill_us + decode_stats.host_cache_fill_us;
+    stats.host_memcpy_us = prefill_stats.host_memcpy_us + decode_stats.host_memcpy_us;
+    stats.host_memcpy_bytes = prefill_stats.host_memcpy_bytes + decode_stats.host_memcpy_bytes;
+    stats.h2d_bytes = prefill_stats.h2d_bytes + decode_stats.h2d_bytes;
+    stats.pinned_staging_wait_us = prefill_stats.pinned_staging_wait_us + decode_stats.pinned_staging_wait_us;
     stats.h2d_us = prefill_stats.h2d_us + decode_stats.h2d_us;
     stats.compute_us = prefill_stats.compute_us + decode_stats.compute_us;
     stats.stall_us = prefill_stats.stall_us + decode_stats.stall_us;
@@ -490,7 +575,7 @@ profile_phase_stats profiler::total() const {
 }
 
 void profiler::write_header() {
-    csv << "row_type,request_idx,repeat_idx,batch_idx,token_idx,phase,layer,k_required,k_hit,k_miss,ssd_read_us,h2d_us,compute_us,stall_us,pred_us,pred_observe_us,pred_score_us,callback_wall_us,topk_d2h_us,slot_ids_h2d_us,slot_table_h2d_us,eamc_rows_scored,eamc_cosine_us,eamc_score_materialize_us,eamc_score_cache_hits,eamc_score_cache_misses,cache_resident_experts,predictor,request_wall_us,request_end_us,predictor_end_us,predictor_save_us,profile_flush_us,sidecar_write_bytes,routes_required,routes_hit,routes_persistent,k_empty_admit,k_victim_admit,k_scratch,route_rank_us\n";
+    csv << "row_type,request_idx,repeat_idx,batch_idx,token_idx,phase,layer,k_required,k_hit,k_miss,ssd_read_us,h2d_us,compute_us,stall_us,pred_us,pred_observe_us,pred_score_us,callback_wall_us,topk_d2h_us,slot_ids_h2d_us,slot_table_h2d_us,eamc_rows_scored,eamc_cosine_us,eamc_score_materialize_us,eamc_score_cache_hits,eamc_score_cache_misses,cache_resident_experts,predictor,request_wall_us,request_end_us,predictor_end_us,predictor_save_us,profile_flush_us,sidecar_write_bytes,routes_required,routes_hit,routes_persistent,k_empty_admit,k_victim_admit,k_scratch,route_rank_us,host_cache_hits,host_cache_misses,host_cache_hit_bytes,host_cache_miss_bytes,host_cache_lookup_us,host_cache_fill_us,host_memcpy_us,host_memcpy_bytes,h2d_bytes,pinned_staging_wait_us,ssd_bytes,ssd_reads,route_hash\n";
 }
 
 } // namespace llama_moe

@@ -1,0 +1,3 @@
+metric	baseline_median	experiment_off_median	delta_pct
+TPOT_ms	35.3000	32.7100	-7.3371
+TTFT_ms	4286.1000	4159.0000	-2.9654

@@ -1,0 +1,4 @@
+commit=f2344e9cdb7729cdc5c17bc196f0a2f51dc34909
+source=/tmp/llama-dram-cache-baseline-FsqlZC
+binary=/tmp/llama-dram-cache-baseline-FsqlZC/build-moe/bin/llama-moe-bench
+built=2026-07-29T04:13:49+00:00

@@ -1571,6 +1571,8 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
     mparams.moe_eamc_path       = params.moe_eamc_path.empty() ? nullptr : params.moe_eamc_path.c_str();
     mparams.moe_profile_csv     = params.moe_profile_csv.empty() ? nullptr : params.moe_profile_csv.c_str();
     mparams.moe_profile_summary = params.moe_profile_summary.empty() ? nullptr : params.moe_profile_summary.c_str();
+    mparams.moe_host_cache      = params.moe_host_cache.c_str();
+    mparams.moe_host_cache_preload = params.moe_host_cache_preload.c_str();
     mparams.moe_cache_vram_mb   = params.moe_cache_vram_mb < 0 ? 0 : (uint64_t) params.moe_cache_vram_mb;
     mparams.moe_cache_vram_frac = params.moe_cache_vram_frac;
     mparams.moe_offload         = params.moe_offload;

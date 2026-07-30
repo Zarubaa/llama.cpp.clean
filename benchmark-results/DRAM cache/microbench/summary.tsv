@@ -1,0 +1,9 @@
+family	topology	operation	samples	mean_us	p50_us	p95_us	aggregate_gib_s
+pageable-copy	local	fread-pinned	5120	89.4006	88.0000	119.0000	6.6378
+pageable-copy	local	pageable-pinned	5120	53.0232	50.0000	77.0000	11.1918
+pageable-copy	local	pageable-staging-h2d	5120	83.8727	81.0000	111.0000	7.0753
+pageable-copy	remote	fread-pinned	5120	89.7867	87.0000	120.0000	6.6093
+pageable-copy	remote	pageable-pinned	5120	62.4330	54.0000	115.9000	9.5050
+pageable-copy	remote	pageable-staging-h2d	5120	94.8312	87.0000	158.2500	6.2577
+pinned-h2d	local	pinned-h2d	5120	30.8494	29.0000	35.0000	19.2361
+pinned-h2d	remote	pinned-h2d	5120	32.3982	31.0000	37.0000	18.3165

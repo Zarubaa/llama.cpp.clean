@@ -1,0 +1,5 @@
+mode	run_count	prefill_median_ms	decode_tpot_median_ms	decode_mean_ms	decode_p95_ms	decode_stddev_ms	decode_cv_pct
+control-0716	8	5411.5000	22.4250	22.8875	24.4190	1.0681	4.6666
+pageable-cold	8	13726.1500	31.4600	32.1013	33.8830	1.4814	4.6148
+pageable-hot	15	8232.0000	28.3700	29.0413	32.5160	1.9429	6.6901
+pinned-hot	15	1558.2000	13.7500	15.0407	18.6160	2.7686	18.4075

@@ -1,0 +1,17 @@
+mode	host_cache	preload	vram_cache_mb	ubatch	pp	tg	runs
+control-0716	off	none	6000	512	1024	1024	8
+control-0716	off	none	6000	1024	1024	1024	8
+control-0716	off	none	8000	512	1024	1024	8
+control-0716	off	none	8000	1024	1024	1024	8
+pageable-cold	pageable	none	6000	512	1024	1024	8
+pageable-cold	pageable	none	6000	1024	1024	1024	8
+pageable-cold	pageable	none	8000	512	1024	1024	8
+pageable-cold	pageable	none	8000	1024	1024	1024	8
+pageable-hot	pageable	all	6000	512	1024	1024	15
+pageable-hot	pageable	all	6000	1024	1024	1024	8
+pageable-hot	pageable	all	8000	512	1024	1024	8
+pageable-hot	pageable	all	8000	1024	1024	1024	8
+pinned-hot	pinned	all	6000	512	1024	1024	8
+pinned-hot	pinned	all	6000	1024	1024	1024	8
+pinned-hot	pinned	all	8000	512	1024	1024	8
+pinned-hot	pinned	all	8000	1024	1024	1024	8

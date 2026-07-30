@@ -36,6 +36,16 @@ struct profile_row {
     uint64_t eamc_score_cache_misses = 0;
     uint64_t ssd_bytes = 0;
     uint64_t ssd_reads = 0;
+    uint64_t host_cache_hits = 0;
+    uint64_t host_cache_misses = 0;
+    uint64_t host_cache_hit_bytes = 0;
+    uint64_t host_cache_miss_bytes = 0;
+    int64_t host_cache_lookup_us = 0;
+    int64_t host_cache_fill_us = 0;
+    int64_t host_memcpy_us = 0;
+    uint64_t host_memcpy_bytes = 0;
+    uint64_t h2d_bytes = 0;
+    int64_t pinned_staging_wait_us = 0;
     int cache_resident_experts = 0;
     std::string predictor = "lru";
     uint64_t routes_required = 0;
@@ -45,6 +55,7 @@ struct profile_row {
     uint64_t k_victim_admit = 0;
     uint64_t k_scratch = 0;
     int64_t route_rank_us = 0;
+    uint64_t route_hash = 0;
 };
 
 struct profile_request_row {
@@ -68,6 +79,16 @@ struct profile_phase_stats {
     uint64_t misses = 0;
     uint64_t ssd_bytes = 0;
     uint64_t ssd_reads = 0;
+    uint64_t host_cache_hits = 0;
+    uint64_t host_cache_misses = 0;
+    uint64_t host_cache_hit_bytes = 0;
+    uint64_t host_cache_miss_bytes = 0;
+    int64_t host_cache_lookup_us = 0;
+    int64_t host_cache_fill_us = 0;
+    int64_t host_memcpy_us = 0;
+    uint64_t host_memcpy_bytes = 0;
+    uint64_t h2d_bytes = 0;
+    int64_t pinned_staging_wait_us = 0;
     int64_t ssd_read_us = 0;
     int64_t h2d_us = 0;
     int64_t compute_us = 0;
@@ -138,6 +159,23 @@ struct profile_summary_context {
     uint64_t vram_device_baseline_bytes = 0;
     uint64_t vram_device_peak_bytes = 0;
     uint64_t dram_peak_bytes = 0;
+    uint64_t dram_rss_bytes = 0;
+    uint64_t dram_locked_bytes = 0;
+    std::string host_cache_mode = "off";
+    std::string host_cache_preload = "none";
+    uint64_t host_cache_capacity_bytes = 0;
+    uint64_t host_cache_data_bytes = 0;
+    uint64_t host_cache_ready_blobs = 0;
+    uint64_t host_cache_total_blobs = 0;
+    uint64_t host_cache_ready_bytes_after_prefill = 0;
+    uint64_t host_cache_ready_bytes_after_decode = 0;
+    int64_t host_cache_preload_alloc_us = 0;
+    int64_t host_cache_preload_read_us = 0;
+    int64_t host_cache_preload_total_us = 0;
+    uint64_t host_cache_preload_bytes = 0;
+    uint64_t host_cache_verified_blobs = 0;
+    uint64_t host_cache_verification_failures = 0;
+    double service_cold_start_ttft_ms = 0.0;
 };
 
 class profiler {

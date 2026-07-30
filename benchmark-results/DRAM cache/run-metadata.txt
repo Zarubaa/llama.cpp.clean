@@ -1,0 +1,48 @@
+started=2026-07-29T07:25:54+00:00
+repo=/home/haozhe.lou/llama.cpp.clean
+branch=20260728-Fate-hidden-state-prefetch
+commit=f2344e9cdb7729cdc5c17bc196f0a2f51dc34909
+model=/home/haozhe.lou/models/Qwen3.6-35B-A3B-UD-Q4_K_M.moe.gguf
+model_sha256=4674317e422518acafef023522768e25a42b58e22f960e5a83133bedd0cd14b4
+benchmark_binary=/home/haozhe.lou/llama.cpp.clean/build-moe/bin/llama-moe-bench
+gpu_index=0
+cpu_list=0-31,64-95
+pp=1024
+tg=1024
+runs=15
+ulimit_locked_kib=66001824
+git_status_begin
+ M common/arg.cpp
+ M common/common.cpp
+ M common/common.h
+ M include/llama.h
+ M src/CMakeLists.txt
+ M src/llama-context.cpp
+ M src/llama-model.cpp
+ M src/moe-offload/io.cpp
+ M src/moe-offload/io.h
+ M src/moe-offload/loader.cpp
+ M src/moe-offload/profiler.cpp
+ M src/moe-offload/profiler.h
+ M src/moe-offload/runtime.h
+ M src/moe-offload/slot_pool.cpp
+ M tests/CMakeLists.txt
+ M tools/CMakeLists.txt
+ M tools/moe-bench/main.cpp
+?? "benchmark-results/DRAM cache/"
+?? src/moe-offload/host_cache.cpp
+?? src/moe-offload/host_cache.h
+?? tests/test-moe-host-cache.cpp
+?? tools/moe-host-cache-bench/
+git_status_end
+0, GPU-1320bb85-9ed7-48ae-7229-7d8f1e6ca252, NVIDIA L20, 00000000:38:00.0, 46068 MiB, 575.64.03
+CPU(s):                                  128
+On-line CPU(s) list:                     0-127
+Model name:                              INTEL(R) XEON(R) GOLD 6530
+NUMA node(s):                            2
+NUMA node0 CPU(s):                       0-31,64-95
+NUMA node1 CPU(s):                       32-63,96-127
+               total        used        free      shared  buff/cache   available
+Mem:     540686958592 89465753600 42569314304    40124416 408651890688 447642599424
+Swap:     8589930496  2638479360  5951451136
+completed=2026-07-29T07:38:28+00:00

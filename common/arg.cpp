@@ -2471,6 +2471,26 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ));
     add_opt(common_arg(
+        {"--moe-host-cache"}, "{off,pageable,pinned}",
+        "host DRAM cache for immutable MoE expert blobs",
+        [](common_params & params, const std::string & value) {
+            if (value != "off" && value != "pageable" && value != "pinned") {
+                throw std::invalid_argument("invalid value");
+            }
+            params.moe_host_cache = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--moe-host-cache-preload"}, "{none,all}",
+        "preload all expert blobs into the host DRAM cache before inference",
+        [](common_params & params, const std::string & value) {
+            if (value != "none" && value != "all") {
+                throw std::invalid_argument("invalid value");
+            }
+            params.moe_host_cache_preload = value;
+        }
+    ));
+    add_opt(common_arg(
         {"--moe-oracle"},
         "enable diagnostic oracle mode for MoE offload profiling",
         [](common_params & params) {

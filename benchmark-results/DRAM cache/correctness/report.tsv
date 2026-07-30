@@ -1,0 +1,5 @@
+mode	tokens_equal	max_abs_logit_diff	threshold	passed
+control-0716	true	0	1e-05	true
+pageable-cold	true	0	1e-05	true
+pageable-hot	true	0	1e-05	true
+pinned-hot	true	0	1e-05	true

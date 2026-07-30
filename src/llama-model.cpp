@@ -23,6 +23,7 @@
 
 #ifdef LLAMA_MOE_OFFLOAD
 #include "moe-offload/runtime.h"
+#include "moe-offload/host_cache.h"
 #include "moe-offload/slot_pool.h"
 #endif
 
@@ -1035,6 +1036,13 @@ llama_model::llama_model(const llama_model_params & params) : params(params), pi
 }
 
 llama_model::~llama_model() {
+#ifdef LLAMA_MOE_OFFLOAD
+    if (params.moe_offload) {
+        llama_moe::host_cache_shutdown();
+        llama_moe::reset_slot_pool();
+        llama_moe::configure_runtime({}, {});
+    }
+#endif
     for (auto * lora : loras) {
         delete lora;
     }
@@ -2336,6 +2344,8 @@ llama_model_params llama_model_default_params() {
         /*.moe_eamc_path               =*/ nullptr,
         /*.moe_profile_csv             =*/ nullptr,
         /*.moe_profile_summary         =*/ nullptr,
+        /*.moe_host_cache              =*/ "off",
+        /*.moe_host_cache_preload      =*/ "none",
         /*.moe_cache_vram_mb           =*/ 0,
         /*.moe_cache_vram_frac         =*/ 0.0f,
     #endif

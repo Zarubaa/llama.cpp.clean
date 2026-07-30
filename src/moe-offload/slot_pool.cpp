@@ -2,6 +2,7 @@
 
 #include "admission.h"
 #include "io.h"
+#include "host_cache.h"
 #include "loader.h"
 #include "predictor.h"
 #include "profiler.h"
@@ -141,6 +142,7 @@ struct slot_pool_state {
     // pending profile rows above; only pinned_buf ownership lives here.
     struct inflight_h2d_buffer {
         void * pinned_buf = nullptr;
+        bool owns_pinned_buf = false;
         void * h2d_begin_event = nullptr;
         void * h2d_event = nullptr;
         int layer = -1;
@@ -964,6 +966,16 @@ struct load_stats {
     int64_t h2d_us = 0;
     uint64_t ssd_bytes = 0;
     uint64_t ssd_reads = 0;
+    uint64_t host_cache_hits = 0;
+    uint64_t host_cache_misses = 0;
+    uint64_t host_cache_hit_bytes = 0;
+    uint64_t host_cache_miss_bytes = 0;
+    int64_t host_cache_lookup_us = 0;
+    int64_t host_cache_fill_us = 0;
+    int64_t host_memcpy_us = 0;
+    uint64_t host_memcpy_bytes = 0;
+    uint64_t h2d_bytes = 0;
+    int64_t pinned_staging_wait_us = 0;
 };
 
 static int64_t elapsed_us(std::chrono::steady_clock::time_point start,
@@ -976,7 +988,7 @@ int release_completed_h2d_buffers(slot_pool_state & s) {
     auto it = s.inflight_h2d.begin();
     while (it != s.inflight_h2d.end()) {
         if (!it->h2d_event || io_event_query(it->h2d_event)) {
-            if (it->pinned_buf) {
+            if (it->pinned_buf && it->owns_pinned_buf) {
                 io_release_buffer(it->pinned_buf);
             }
             it = s.inflight_h2d.erase(it);
@@ -993,9 +1005,9 @@ void wait_all_h2d_buffers(slot_pool_state & s) {
         if (b.h2d_event) {
             io_event_sync(b.h2d_event);
         }
-        if (b.pinned_buf) {
+        if (b.pinned_buf && b.owns_pinned_buf) {
             io_release_buffer(b.pinned_buf);
-            b.pinned_buf = nullptr;
+        b.pinned_buf = nullptr;
         }
     }
     s.inflight_h2d.clear();
@@ -1306,6 +1318,16 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
             observed_routes.push_back((int) e);
         }
     }
+    // FNV-1a over the ordered route IDs gives the benchmark a compact,
+    // deterministic route trace without writing every expert ID to the CSV.
+    uint64_t route_hash = 1469598103934665603ull;
+    for (int expert : observed_routes) {
+        const uint32_t value = (uint32_t) expert;
+        for (int shift = 0; shift < 32; shift += 8) {
+            route_hash ^= (uint8_t) (value >> shift);
+            route_hash *= 1099511628211ull;
+        }
+    }
     const auto route_rank_end = std::chrono::steady_clock::now();
     const int64_t route_rank_us = elapsed_us(route_rank_start, route_rank_end);
     const uint64_t routes_required = (uint64_t) observed_routes.size();
@@ -1442,10 +1464,11 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
         uint64_t      file_offset;
         char *        gpu_dst;
     };
-    std::unordered_map<void *, miss_meta> miss_lookup;
+    std::unordered_map<uint64_t, miss_meta> miss_lookup;
     std::vector<miss_blob> miss_blobs;
     int submitted_misses = 0;
     int completed_misses = 0;
+    uint64_t next_request_id = 1;
     int64_t stall_us = 0;
 
     // Phase I: per-miss h2d timing events stashed for elapsed-time query at
@@ -1668,15 +1691,28 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
                         c.layer, c.expert, c.kind, c.slot,
                         (unsigned long long) c.file_offset,
                         c.blob_size, c.bytes_read, c.io_error);
-                io_release_buffer(c.pinned_buf);
-                miss_lookup.erase(c.pinned_buf);
+                if (c.owns_pinned_buf && c.pinned_buf) {
+                    io_release_buffer(c.pinned_buf);
+                }
+                miss_lookup.erase(c.request_id);
                 ++completed_misses;
                 GGML_ABORT("MoE-offload: expert blob I/O failed");
             }
 
             layer_load_stats.ssd_read_us += c.ssd_read_us;
-            layer_load_stats.ssd_bytes   += c.blob_size;
-            ++layer_load_stats.ssd_reads;
+            if (c.bytes_read > 0) {
+                layer_load_stats.ssd_bytes += c.bytes_read;
+                ++layer_load_stats.ssd_reads;
+            }
+            layer_load_stats.host_cache_hits += c.host_cache_hit ? 1 : 0;
+            layer_load_stats.host_cache_misses += c.host_cache_miss ? 1 : 0;
+            layer_load_stats.host_cache_hit_bytes += c.host_cache_hit ? c.blob_size : 0;
+            layer_load_stats.host_cache_miss_bytes += c.host_cache_miss ? c.blob_size : 0;
+            layer_load_stats.host_cache_lookup_us += c.host_cache_lookup_us;
+            layer_load_stats.host_cache_fill_us += c.host_cache_fill_us;
+            layer_load_stats.host_memcpy_us += c.host_memcpy_us;
+            layer_load_stats.host_memcpy_bytes += c.host_memcpy_bytes;
+            layer_load_stats.h2d_bytes += c.blob_size;
 
             if (c.h2d_event) {
                 // Async path: tell the compute stream to wait on the H2D end
@@ -1687,6 +1723,7 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
                 if (compute_wait_ok) {
                     s.inflight_h2d.push_back(slot_pool_state::inflight_h2d_buffer{
                         c.pinned_buf,
+                        c.owns_pinned_buf,
                         c.h2d_begin_event,
                         c.h2d_event,
                         c.layer,
@@ -1706,12 +1743,12 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
                 // Fallback: CUDA unavailable or io_h2d_async failed. Look up
                 // the slot tensor by the pinned-buffer handle and do a sync
                 // ggml_backend_tensor_set.
-                auto it = miss_lookup.find(c.pinned_buf);
+                auto it = miss_lookup.find(c.request_id);
                 if (it == miss_lookup.end()) {
                     LLAMA_LOG_ERROR("moe_eval_callback: completion without lookup entry (L%d)\n", logical);
                 } else {
                     const auto h2d_start = std::chrono::steady_clock::now();
-                    set_tensor_for_compute(s, it->second.slot_tensor, c.pinned_buf,
+                    set_tensor_for_compute(s, it->second.slot_tensor, c.host_src,
                                            it->second.write_off, c.blob_size);
                     const auto h2d_end = std::chrono::steady_clock::now();
                     layer_load_stats.h2d_us += std::chrono::duration_cast<std::chrono::microseconds>(
@@ -1722,15 +1759,15 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
             if (debug_slot_fingerprint() && c.kind == EXPERT_GATE && c.blob_size > 0) {
                 size_t fp_sz = c.blob_size < 1024 ? (size_t) c.blob_size : 1024;
                 uint64_t fp = 0xcbf29ce484222325ULL;
-                const uint8_t * src = (const uint8_t *) c.pinned_buf;
+                const uint8_t * src = (const uint8_t *) c.host_src;
                 for (size_t i = 0; i < fp_sz; ++i) { fp ^= src[i]; fp *= 0x100000001b3ULL; }
                 lc.fingerprints[c.expert] = fp;
             }
 
-            if (release_pinned_now) {
+            if (release_pinned_now && c.owns_pinned_buf && c.pinned_buf) {
                 io_release_buffer(c.pinned_buf);
             }
-            miss_lookup.erase(c.pinned_buf);
+            miss_lookup.erase(c.request_id);
             ++completed_misses;
         }
         release_completed_h2d_buffers(s);
@@ -1739,14 +1776,17 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
 
     if (!miss_blobs.empty()) {
         static const bool diag_no_async = std::getenv("LLAMA_MOE_DEBUG_NO_ASYNC") != nullptr;
+        const bool direct_pinned_cache = host_cache_is_pinned();
         size_t next_miss = 0;
 
         while (next_miss < miss_blobs.size() || completed_misses < submitted_misses) {
             bool made_progress = false;
+            bool waiting_for_staging = false;
 
             while (next_miss < miss_blobs.size()) {
-                void * pinned = io_try_acquire_buffer();
-                if (!pinned) {
+                void * pinned = direct_pinned_cache ? nullptr : io_try_acquire_buffer();
+                if (!direct_pinned_cache && !pinned) {
+                    waiting_for_staging = true;
                     if (release_completed_h2d_buffers(s) > 0) {
                         made_progress = true;
                         continue;
@@ -1756,11 +1796,13 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
 
                 const miss_blob & blob = miss_blobs[next_miss];
                 io_request req{};
+                req.request_id  = next_request_id++;
                 req.layer       = logical;
                 req.expert      = blob.expert;
                 req.kind        = blob.kind;
                 req.slot        = blob.slot;
                 req.pinned_buf  = pinned;
+                req.owns_pinned_buf = pinned != nullptr;
                 req.blob_size   = blob.blob_size;
                 req.file_offset = blob.file_offset;
                 req.gpu_dst     = blob.gpu_dst;
@@ -1770,11 +1812,13 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
                 req.ssd_read_us = 0;
 
                 if (!io_submit(req)) {
-                    io_release_buffer(pinned);
+                    if (pinned) {
+                        io_release_buffer(pinned);
+                    }
                     break;
                 }
 
-                miss_lookup[pinned] = miss_meta{ blob.slot_tensor, blob.write_off };
+                miss_lookup[req.request_id] = miss_meta{ blob.slot_tensor, blob.write_off };
                 ++submitted_misses;
                 ++next_miss;
                 made_progress = true;
@@ -1807,6 +1851,10 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
                 const auto wait_end = std::chrono::steady_clock::now();
                 stall_us += std::chrono::duration_cast<std::chrono::microseconds>(
                         wait_end - wait_start).count();
+                if (waiting_for_staging) {
+                    layer_load_stats.pinned_staging_wait_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                            wait_end - wait_start).count();
+                }
             }
         }
     }
@@ -1941,6 +1989,16 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
         p.row.slot_table_h2d_us = slot_table_h2d_us;
         p.row.ssd_bytes = layer_load_stats.ssd_bytes;
         p.row.ssd_reads = layer_load_stats.ssd_reads;
+        p.row.host_cache_hits = layer_load_stats.host_cache_hits;
+        p.row.host_cache_misses = layer_load_stats.host_cache_misses;
+        p.row.host_cache_hit_bytes = layer_load_stats.host_cache_hit_bytes;
+        p.row.host_cache_miss_bytes = layer_load_stats.host_cache_miss_bytes;
+        p.row.host_cache_lookup_us = layer_load_stats.host_cache_lookup_us;
+        p.row.host_cache_fill_us = layer_load_stats.host_cache_fill_us;
+        p.row.host_memcpy_us = layer_load_stats.host_memcpy_us;
+        p.row.host_memcpy_bytes = layer_load_stats.host_memcpy_bytes;
+        p.row.h2d_bytes = layer_load_stats.h2d_bytes;
+        p.row.pinned_staging_wait_us = layer_load_stats.pinned_staging_wait_us;
         p.row.cache_resident_experts = (int) lc.exp2slot.size();
         p.row.predictor = s.pred->name();
         p.row.routes_required = routes_required;
@@ -1950,6 +2008,7 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
         p.row.k_victim_admit = (uint64_t) dbg_evictions;
         p.row.k_scratch = (uint64_t) dbg_scratch_alloc;
         p.row.route_rank_us = route_rank_us;
+        p.row.route_hash = route_hash;
         p.h2d_events = std::move(h2d_events_for_row);
 
         // Phase I: record compute_begin on the compute stream right after
@@ -2035,9 +2094,7 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
 void slot_pool_init_io(const std::string & source_path) {
     // Lazy-init: called on first eval-callback or externally. If the worker
     // is already running, this is a no-op.
-    static bool initialized = false;
-    if (initialized) return;
-    initialized = true;
+    if (io_initialized()) return;
 
     const manifest & mf = get_manifest();
 
@@ -2050,6 +2107,7 @@ void slot_pool_init_io(const std::string & source_path) {
     int n_buffers = (int)(2 * active_slots_per_layer());
     if (n_buffers < kMinIoBuffers) n_buffers = kMinIoBuffers;
     if (n_buffers > kMaxIoBuffers) n_buffers = kMaxIoBuffers;
+    if (host_cache_is_pinned()) n_buffers = 0;
     size_t blob_max = mf.expert_blob_size_max > 0 ? mf.expert_blob_size_max : (1024*1024);
 
     LLAMA_LOG_INFO("%s: initializing async I/O worker (n_buffers=%d, blob_max=%zu)\n",

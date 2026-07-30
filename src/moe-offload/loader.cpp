@@ -1,6 +1,7 @@
 #include "loader.h"
 
 #include "predictor.h"
+#include "host_cache.h"
 #include "runtime.h"
 #include "slot_pool.h"
 
@@ -179,6 +180,7 @@ bool configure_from_params(
         }
         configure_runtime({}, mf);
         reset_slot_pool();
+        host_cache_shutdown();
         return true;
     }
 
@@ -199,7 +201,22 @@ bool configure_from_params(
     }
     opts.profile_csv = params.moe_profile_csv ? params.moe_profile_csv : "";
     opts.profile_summary = params.moe_profile_summary ? params.moe_profile_summary : "";
+    opts.host_cache = params.moe_host_cache ? params.moe_host_cache : "off";
+    opts.host_cache_preload = params.moe_host_cache_preload ? params.moe_host_cache_preload : "none";
     opts.oracle = params.moe_oracle;
+
+    if (opts.host_cache != "off" && opts.host_cache != "pageable" && opts.host_cache != "pinned") {
+        LLAMA_LOG_ERROR("%s: invalid --moe-host-cache value: %s\n", __func__, opts.host_cache.c_str());
+        return false;
+    }
+    if (opts.host_cache_preload != "none" && opts.host_cache_preload != "all") {
+        LLAMA_LOG_ERROR("%s: invalid --moe-host-cache-preload value: %s\n", __func__, opts.host_cache_preload.c_str());
+        return false;
+    }
+    if (opts.host_cache == "off" && opts.host_cache_preload != "none") {
+        LLAMA_LOG_ERROR("%s: --moe-host-cache-preload=all requires pageable or pinned host cache\n", __func__);
+        return false;
+    }
 
     try {
         parse_predictor_kind(opts.predictor);
@@ -210,6 +227,13 @@ bool configure_from_params(
 
     configure_runtime(opts, mf);
     configure_slot_pool();
+    if (!host_cache_init(mf, opts.host_cache, opts.host_cache_preload)) {
+        LLAMA_LOG_ERROR("%s: failed to initialize %s host expert cache\n",
+                __func__, opts.host_cache.c_str());
+        reset_slot_pool();
+        configure_runtime({}, mf);
+        return false;
+    }
         LLAMA_LOG_INFO("%s: enabled MoE offload metadata v%u, layout=%s, predictor=%s, cache=%llu MiB\n",
             __func__, mf.version, mf.layout.empty() ? "unknown" : mf.layout.c_str(), opts.predictor.c_str(), (unsigned long long) opts.cache_vram_mb);
     return true;

@@ -59,6 +59,7 @@ if (LLAMA_MOE_OFFLOAD)
     target_sources(llama PRIVATE
         moe-offload/admission.cpp
         moe-offload/cache.cpp
+        moe-offload/host_cache.cpp
         moe-offload/io.cpp
         moe-offload/loader.cpp
         moe-offload/platform_io.cpp

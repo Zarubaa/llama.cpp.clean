@@ -525,6 +525,11 @@ llama_context::llama_context(
 }
 
 llama_context::~llama_context() {
+#ifdef LLAMA_MOE_OFFLOAD
+    if (llama_moe::runtime_enabled()) {
+        llama_moe::slot_pool_shutdown_io();
+    }
+#endif
     if (!model.hparams.no_alloc) {
         for (size_t i = 0; i < backend_ptrs.size(); ++i) {
             ggml_backend_t             backend = backend_ptrs[i];
@@ -1393,11 +1398,9 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         if (llama_moe::runtime_enabled() && llama_moe::streaming_mode()) {
             ggml_backend_sched_set_eval_callback(sched.get(), llama_moe::moe_eval_callback, nullptr);
 
-            static bool io_inited = false;
-            if (!io_inited) {
-                io_inited = true;
-                llama_moe::slot_pool_init_io(llama_moe::get_manifest().source_path);
+            llama_moe::slot_pool_init_io(llama_moe::get_manifest().source_path);
 
+            {
                 ggml_backend_t cuda_be = nullptr;
                 const int n_be = ggml_backend_sched_get_n_backends(sched.get());
                 for (int i = 0; i < n_be; ++i) {
