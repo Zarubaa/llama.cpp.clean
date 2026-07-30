@@ -1,0 +1,207 @@
+diff --git a/tools/moe-bench/main.cpp b/tools/moe-bench/main.cpp
+index 19effb21b..0f9a7d6b2 100644
+--- a/tools/moe-bench/main.cpp
++++ b/tools/moe-bench/main.cpp
+@@ -37,6 +37,7 @@
+ struct bench_params {
+     std::string model;
+     std::string prompt;
++    std::string prompt_file;
+     int n_prompt = 1024;
+     int n_gen = 256;
+     int n_repeat = 3;
+@@ -94,6 +95,7 @@ static bool parse_args(int argc, char ** argv, bench_params & p) {
+         else if (arg == "--moe-reset-cache-between-repeats") { p.moe_reset_cache_between_repeats = true; }
+         else if (arg == "--moe-warm-cache") { p.moe_warm_cache = true; }
+         else if (arg == "--moe-hot-start") { p.moe_hot_start = true; }
++        else if (value_for("--prompt-file", p.prompt_file)) {}
+         else if (value_for("-p", p.prompt)) {}
+     }
+     if (p.n_repeat < 1) p.n_repeat = 1;
+@@ -342,12 +344,12 @@ static std::string build_summary(
+     return out.str();
+ }
+ 
+-static llama_token greedy_token(llama_context * ctx, int vocab_size) {
+-    float * logits = llama_get_logits_ith(ctx, 0);
++static bool greedy_token(llama_context * ctx, int vocab_size, llama_token & token) {
++    float * logits = llama_get_logits_ith(ctx, -1);
+     if (!logits) {
+-        return 0;
++        return false;
+     }
+-    llama_token token = 0;
++    token = 0;
+     float max_logit = logits[0];
+     for (int v = 1; v < vocab_size; ++v) {
+         if (logits[v] > max_logit) {
+@@ -355,17 +357,35 @@ static llama_token greedy_token(llama_context * ctx, int vocab_size) {
+             token = v;
+         }
+     }
+-    return token;
++    return true;
+ }
+ 
+ int main(int argc, char ** argv) {
+     bench_params p;
+     if (!parse_args(argc, argv, p)) {
+-        fprintf(stderr, "Usage: llama-moe-bench --model <path> --pp N --tg N [--repeat N] [--moe-cache-vram-mb MB] [--moe-predictor lru|eamc] [--moe-eamc-path PATH] [--moe-profile-csv PATH] [--moe-profile-summary PATH] [--moe-reset-cache-between-repeats] [--moe-warm-cache] [--moe-hot-start] [-ub N]\n");
++        fprintf(stderr, "Usage: llama-moe-bench --model <path> --pp N --tg N [--repeat N] [--prompt-file PATH | -p PROMPT] [--moe-cache-vram-mb MB] [--moe-predictor lru|eamc] [--moe-eamc-path PATH] [--moe-profile-csv PATH] [--moe-profile-summary PATH] [--moe-reset-cache-between-repeats] [--moe-warm-cache] [--moe-hot-start] [-ub N]\n");
++        return 1;
++    }
++    if (!p.prompt.empty() && !p.prompt_file.empty()) {
++        fprintf(stderr, "--prompt-file and -p cannot be used together\n");
+         return 1;
+     }
+ 
+     std::string prompt_text = p.prompt;
++    if (!p.prompt_file.empty()) {
++        std::ifstream input(p.prompt_file, std::ios::in | std::ios::binary);
++        if (!input) {
++            fprintf(stderr, "failed to open prompt file: %s\n", p.prompt_file.c_str());
++            return 1;
++        }
++        std::ostringstream buffer;
++        buffer << input.rdbuf();
++        if (input.bad()) {
++            fprintf(stderr, "failed to read prompt file: %s\n", p.prompt_file.c_str());
++            return 1;
++        }
++        prompt_text = buffer.str();
++    }
+     if (prompt_text.empty()) {
+         prompt_text.reserve((size_t) p.n_prompt * 8);
+         for (int i = 0; i < p.n_prompt; ++i) {
+@@ -438,20 +458,43 @@ int main(int argc, char ** argv) {
+ 
+     const llama_vocab * vocab = llama_model_get_vocab(model);
+     const int vocab_size = llama_vocab_n_tokens(vocab);
+-    const int n_tokens_max = p.n_prompt + 128;
+-    std::vector<llama_token> prompt_tokens((size_t) n_tokens_max);
++    const int token_count = -llama_tokenize(vocab,
++            prompt_text.c_str(), (int) prompt_text.size(),
++            nullptr, 0, true, true);
++    if (token_count <= 0) {
++        fprintf(stderr, "failed to determine prompt token count\n");
++        llama_free(ctx);
++        llama_model_free(model);
++        llama_backend_free();
++        return 1;
++    }
++    std::vector<llama_token> prompt_tokens((size_t) token_count);
+     int n_prompt_tokens = llama_tokenize(vocab,
+             prompt_text.c_str(), (int) prompt_text.size(),
+-            prompt_tokens.data(), n_tokens_max, true, true);
+-    if (n_prompt_tokens < 0) {
+-        n_prompt_tokens = p.n_prompt;
+-        for (int i = 0; i < n_prompt_tokens; ++i) {
+-            prompt_tokens[i] = (i % 32000) + 1;
+-        }
++            prompt_tokens.data(), token_count, true, true);
++    if (n_prompt_tokens != token_count) {
++        fprintf(stderr, "prompt tokenization failed: expected %d tokens, got %d\n", token_count, n_prompt_tokens);
++        llama_free(ctx);
++        llama_model_free(model);
++        llama_backend_free();
++        return 1;
+     }
+     if (n_prompt_tokens > p.n_prompt) {
+         n_prompt_tokens = p.n_prompt;
++        prompt_tokens.resize((size_t) n_prompt_tokens);
++    }
++    uint64_t prompt_token_hash = 1469598103934665603ULL;
++    for (llama_token prompt_token : prompt_tokens) {
++        uint32_t value = (uint32_t) prompt_token;
++        for (int byte = 0; byte < 4; ++byte) {
++            prompt_token_hash ^= (uint8_t) (value >> (byte * 8));
++            prompt_token_hash *= 1099511628211ULL;
++        }
+     }
++    fprintf(stderr, "[moe-bench] prompt source=%s bytes=%zu source_tokens=%d used_tokens=%d token_hash=%016llx\n",
++            p.prompt_file.empty() ? "inline" : p.prompt_file.c_str(),
++            prompt_text.size(), token_count, n_prompt_tokens,
++            (unsigned long long) prompt_token_hash);
+ 
+     if (p.moe_hot_start) {
+         const uint32_t n_slots = llama_moe::n_slots_per_layer();
+@@ -529,7 +572,12 @@ int main(int argc, char ** argv) {
+         summary_ctx.dram_peak_bytes = dram_peak_bytes;
+ 
+         const llama_moe::profile_snapshot profile = llama_moe::get_profile_snapshot();
+-        const std::string summary = llama_moe::format_summary(summary_ctx, profile);
++        std::string summary = llama_moe::format_summary(summary_ctx, profile);
++        summary += "prompt source tokens: " + std::to_string(token_count) + '\n';
++        summary += "prompt used tokens: " + std::to_string(n_prompt_tokens) + '\n';
++        std::ostringstream token_hash_stream;
++        token_hash_stream << std::hex << std::setw(16) << std::setfill('0') << prompt_token_hash;
++        summary += "prompt token hash: " + token_hash_stream.str() + '\n';
+ 
+         if (print_stdout) {
+             fputc('\n', stdout);
+@@ -588,8 +636,12 @@ int main(int argc, char ** argv) {
+             exit_code = 1;
+             break;
+         }
+-        update_vram_peak();
+-        dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
++        llama_token token = 0;
++        if (!greedy_token(ctx, vocab_size, token)) {
++            fprintf(stderr, "failed to retrieve final prefill logits (rep %d)\n", rep);
++            exit_code = 1;
++            break;
++        }
+         const double t1 = now_ms();
+         const double measured_ttft_ms = t1 - t0;
+         ttft_ms.push_back(measured_ttft_ms);
+@@ -599,9 +651,11 @@ int main(int argc, char ** argv) {
+         } else {
+             cold_ttft_ms.push_back(measured_ttft_ms);
+         }
+-        write_summary(false);
++        update_vram_peak();
++        dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
+ 
+-        llama_token token = greedy_token(ctx, vocab_size);
++        const double decode_t0 = now_ms();
++        int completed_gen = 0;
+         for (int gen = 0; gen < p.n_gen; ++gen) {
+             batch = llama_batch_get_one(&token, 1);
+             llama_moe::set_profile_request_context(rep, gen + 1, "decode");
+@@ -610,17 +664,22 @@ int main(int argc, char ** argv) {
+                 exit_code = 1;
+                 break;
+             }
+-            token = greedy_token(ctx, vocab_size);
+-            update_vram_peak();
+-            dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
++            ++completed_gen;
++            if (!greedy_token(ctx, vocab_size, token)) {
++                fprintf(stderr, "failed to retrieve decode logits at gen %d (rep %d)\n", gen, rep);
++                exit_code = 1;
++                break;
++            }
+         }
+ 
+         const double t2 = now_ms();
+-        tpot_ms.push_back((t2 - t1) / p.n_gen);
+-        total_ms.push_back(t2 - t0);
++        if (completed_gen != p.n_gen) {
++            break;
++        }
++        tpot_ms.push_back((t2 - decode_t0) / completed_gen);
++        total_ms.push_back(measured_ttft_ms + (t2 - decode_t0));
+         update_vram_peak();
+         dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
+-        write_summary(false);
+     }
+ 
+     if (!llama_moe::flush_predictor()) {
+@@ -634,6 +693,7 @@ int main(int argc, char ** argv) {
+         fprintf(stderr, "warning: no MoE profile rows were recorded; check that the model is a repacked *.moe.gguf and that the run entered streaming mode\n");
+     }
+ 
++    llama_moe::slot_pool_shutdown_io();
+     fprintf(stderr, "[moe-bench] done. prefill_rows=%llu decode_rows=%llu\n",
+             (unsigned long long) profile.prefill.rows,
+             (unsigned long long) profile.decode.rows);

@@ -1,0 +1,114 @@
+{
+  "schema": "llama-moe-bench-pure-lru-v1",
+  "recorded_at_utc": "2026-07-30T12:37:27Z",
+  "container": {
+    "name": "llama-cpp-clean-dev",
+    "image": "nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04"
+  },
+  "source": {
+    "branch": "0730_bench",
+    "commit": "2d4cb3ba7b2269cd223a8a5f0cf0a0b9ff44d498",
+    "dirty": true,
+    "bench_fix_patch": "bench-fix.patch",
+    "bench_fix_patch_sha256": "ff2f1ce6cc8a68294c97cb4ed6ef1e34fcc6a04a5ac167637989029ab92d4c32"
+  },
+  "build": {
+    "directory": "build-pure-lru-2d4cb3ba7-benchfix",
+    "type": "Release",
+    "compiler": "c++ (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0",
+    "cuda_toolkit": "12.8.61",
+    "cuda_architectures": "89",
+    "ggml_cuda": true,
+    "ggml_cuda_fa": true,
+    "ggml_cuda_graphs": true,
+    "ggml_cuda_compression_mode": "size",
+    "llama_moe_offload": true,
+    "binary_contains_mtp_schema": false,
+    "sha256": {
+      "llama-moe-bench": "fe83ef7699d4f2ad4ac621286eba5c88b334e373fdfc2e8b9bd7484f73ea2ce3",
+      "libllama.so.0.0.10005": "7b12b6c6d3d82157f91a8545e97ddd2c936238428f9627931adcc9653db7d181",
+      "libggml.so.0.16.0": "9e75cd981d47e9fc01da47740a13394cfe318a99bdad517c4976f44e19d38010",
+      "libggml-base.so.0.16.0": "10bf72232760aa3d5027b034533716af76a2db94c34c3b47efa77349dc097da0",
+      "libggml-cuda.so.0.16.0": "d21eef08c9708a39ef0a1f5f3648d539e72464d8ccf758536eece6a8ea30e896"
+    }
+  },
+  "gpu": {
+    "visible_device": "1",
+    "uuid": "GPU-76684970-c5fc-f3d7-8a03-cc1f3f58975e",
+    "name": "NVIDIA L20",
+    "driver": "575.64.03",
+    "memory_total_mib": 46068,
+    "before": "3 MiB, 0%, 34 C, P8, SM 285 MHz, memory 405 MHz, 34.24 W",
+    "after": "3 MiB, 0%, 35 C, P8, SM 210 MHz, memory 405 MHz, 34.38 W",
+    "other_gpu_workload_present": true
+  },
+  "workload": {
+    "model": "/workspace/models/Qwen3.6-35B-A3B-UD-Q4_K_M.moe.gguf",
+    "model_kind": "non-MTP Q4_K_M MoE offload GGUF",
+    "model_sha256": "4674317e422518acafef023522768e25a42b58e22f960e5a83133bedd0cd14b4",
+    "prompt": "/workspace/benchmark-results/new-result/prompts/normal-long-prompt.zh-en.txt",
+    "prompt_sha256": "78fd02cac487c229f9e2399ea35905847dd1823a641cca7f762facc714ea1e80",
+    "prompt_source_tokens": 16961,
+    "prompt_used_tokens": 1024,
+    "prompt_token_hash_fnv1a64": "318c1480f039b981",
+    "pp": 1024,
+    "tg": 1024,
+    "context": 4096,
+    "ubatch": 1024,
+    "repeat": 1,
+    "cache_mib": 6000,
+    "predictor": "lru",
+    "slot_reset_before_repeat": true,
+    "warm_cache": false,
+    "hot_start": false,
+    "profile_csv": false
+  },
+  "storage_state": {
+    "policy": "page-cache-warm-uncontrolled",
+    "model_resident_pages_before": 5404058,
+    "model_resident_display_before": "20.6G / 20.6G",
+    "model_resident_pages_after_targeted_eviction": 5404058,
+    "targeted_eviction_attempts": [
+      "posix_fadvise(POSIX_FADV_DONTNEED)",
+      "mmap.madvise(MADV_DONTNEED)",
+      "dd iflag=nocache count=0"
+    ],
+    "global_drop_caches_used": false,
+    "physical_ssd_latency_valid": false,
+    "note": "The summary SSD counters are logical expert fread counters. The shared host retained all model pages, so this run is not a cold physical-SSD measurement."
+  },
+  "command": "CUDA_VISIBLE_DEVICES=1 LD_LIBRARY_PATH=/workspace/build-pure-lru-2d4cb3ba7-benchfix/bin build-pure-lru-2d4cb3ba7-benchfix/bin/llama-moe-bench --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.moe.gguf --pp 1024 --tg 1024 --repeat 1 -c 4096 -ub 1024 --moe-cache-vram-mb 6000 --moe-predictor lru --moe-reset-cache-between-repeats --prompt-file benchmark-results/new-result/prompts/normal-long-prompt.zh-en.txt --moe-profile-summary benchmark-results/new-result/pure/lru-6g-pp1024-tg1024-ub1024-repeat1-run1-summary.txt",
+  "validation": {
+    "exit_code": 0,
+    "invalid_logits_errors": 0,
+    "fatal_errors": 0,
+    "prefill_profile_rows": 40,
+    "decode_profile_rows": 40960,
+    "io_worker_stopped": true,
+    "cuda_events_in_use_at_shutdown": 0,
+    "done_marker": true
+  },
+  "result": {
+    "prefill_ms": 36655.8,
+    "prefill_ms_per_token": 35.80,
+    "decode_ms": 44528.4,
+    "tpot_ms": 43.48,
+    "prefill_cache_hit_percent": 0.0,
+    "decode_cache_hit_percent": 73.5,
+    "prefill_route_persistent_percent": 74.3,
+    "decode_route_persistent_percent": 100.0,
+    "logical_expert_read_gib_decode": 154.32,
+    "vram_peak_process_gib": 9.74,
+    "dram_peak_process_gib": 1.36
+  },
+  "artifacts": {
+    "log": "lru-6g-pp1024-tg1024-ub1024-repeat1-run1.log",
+    "log_sha256": "17e61f36fbe678445e90bf095e142887eee93e617138946a95e43ce296cceab3",
+    "summary": "lru-6g-pp1024-tg1024-ub1024-repeat1-run1-summary.txt",
+    "summary_sha256": "668c88c7e1c3ba0db55de34e9a27d40887cab3ae57a363b5ec48f702924ef7c3"
+  },
+  "validity": {
+    "valid_for": "LRU routing, residency, cache-hit and wall-time behavior under a fresh process with cold slot/KV state and a fully warm host page cache.",
+    "not_valid_for": "Cold physical-SSD latency or throughput."
+  }
+}
