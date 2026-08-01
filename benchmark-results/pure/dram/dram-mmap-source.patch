@@ -1,0 +1,166 @@
+diff --git a/src/moe-offload/io.cpp b/src/moe-offload/io.cpp
+index 790d9843f..abc73963e 100644
+--- a/src/moe-offload/io.cpp
++++ b/src/moe-offload/io.cpp
+@@ -17,6 +17,9 @@
+ #if defined(_WIN32)
+ #  define moe_io_fseek(f, off, whence) _fseeki64((f), (off), (whence))
+ #else
++#  include <sys/mman.h>
++#  include <sys/stat.h>
++#  include <unistd.h>
+ #  define moe_io_fseek(f, off, whence) fseeko((f), (off), (whence))
+ #endif
+ 
+@@ -152,6 +155,78 @@ struct io_worker {
+     buffer_pool   pool;
+     FILE *        fp = nullptr;
+     std::atomic<int> outstanding{0};
++#if !defined(_WIN32)
++    void *        dram_base = nullptr;
++    size_t        dram_size = 0;
++#endif
++
++    bool read_blob(io_request & req) {
++#if !defined(_WIN32)
++        if (dram_base) {
++            if (req.file_offset > dram_size || req.blob_size > dram_size - (size_t) req.file_offset) {
++                req.io_error = EINVAL;
++                return false;
++            }
++            memcpy(req.pinned_buf, (const char *) dram_base + (size_t) req.file_offset, req.blob_size);
++            req.bytes_read = req.blob_size;
++            return true;
++        }
++#endif
++        int rc = moe_io_fseek(fp, (int64_t) req.file_offset, SEEK_SET);
++        if (rc != 0) {
++            req.io_error = errno;
++            fprintf(stderr, "[moe-io] seek to %llu failed\n",
++                    (unsigned long long) req.file_offset);
++            return false;
++        }
++        req.bytes_read = fread(req.pinned_buf, 1, req.blob_size, fp);
++        if (req.bytes_read != req.blob_size) {
++            req.io_error = ferror(fp) ? errno : 0;
++            fprintf(stderr, "[moe-io] short read: got %zu of %zu\n", req.bytes_read, req.blob_size);
++            return false;
++        }
++        return true;
++    }
++
++#if !defined(_WIN32)
++    bool map_dram_source() {
++        struct stat st = {};
++        if (fstat(fileno(fp), &st) != 0 || st.st_size <= 0) {
++            fprintf(stderr, "[moe-io] fstat failed for DRAM source: %s\n", strerror(errno));
++            return false;
++        }
++
++        const size_t size = (size_t) st.st_size;
++        void * mapped = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fileno(fp), 0);
++        if (mapped == MAP_FAILED) {
++            fprintf(stderr, "[moe-io] mmap failed for DRAM source: %s\n", strerror(errno));
++            return false;
++        }
++
++#if defined(MADV_WILLNEED)
++        if (madvise(mapped, size, MADV_WILLNEED) != 0) {
++            fprintf(stderr, "[moe-io] madvise(MADV_WILLNEED) failed: %s\n", strerror(errno));
++        }
++#endif
++
++        const auto warm_start = std::chrono::steady_clock::now();
++        const long page_size_raw = sysconf(_SC_PAGESIZE);
++        const size_t page_size = page_size_raw > 0 ? (size_t) page_size_raw : 4096;
++        const volatile unsigned char * bytes = (const volatile unsigned char *) mapped;
++        for (size_t offset = 0; offset < size; offset += page_size) {
++            (void) bytes[offset];
++        }
++        (void) bytes[size - 1];
++        const auto warm_end = std::chrono::steady_clock::now();
++
++        dram_base = mapped;
++        dram_size = size;
++        const double seconds = std::chrono::duration<double>(warm_end - warm_start).count();
++        fprintf(stderr, "[moe-io] source=dram mapped=%.2f GiB warmup=%.3f s\n",
++                (double) size / (1024.0 * 1024.0 * 1024.0), seconds);
++        return true;
++    }
++#endif
+ 
+     void run() {
+         io_request req;
+@@ -166,23 +241,8 @@ struct io_worker {
+ 
+             while (queue.pop(req)) {
+                 const auto read_start = std::chrono::steady_clock::now();
+-                int rc = moe_io_fseek(fp, (int64_t) req.file_offset, SEEK_SET);
+-                if (rc != 0) {
+-                    req.ok       = false;
+-                    req.io_error = errno;
+-                    req.bytes_read = 0;
+-                    fprintf(stderr, "[moe-io] seek to %llu failed\n",
+-                            (unsigned long long) req.file_offset);
+-                    done.push(req);
+-                    outstanding.fetch_sub(1, std::memory_order_release);
+-                    continue;
+-                }
+-                size_t got = fread(req.pinned_buf, 1, req.blob_size, fp);
+-                req.bytes_read = got;
+-                if (got != req.blob_size) {
+-                    req.ok       = false;
+-                    req.io_error = ferror(fp) ? errno : 0;
+-                    fprintf(stderr, "[moe-io] short read: got %zu of %zu\n", got, req.blob_size);
++                if (!read_blob(req)) {
++                    req.ok = false;
+                     done.push(req);
+                     outstanding.fetch_sub(1, std::memory_order_release);
+                     continue;
+@@ -229,6 +289,32 @@ struct io_worker {
+             fprintf(stderr, "[moe-io] failed to open %s\n", source_path);
+             return;
+         }
++
++        const char * source = getenv("LLAMA_MOE_EXPERT_SOURCE");
++        const bool request_dram = source && strcmp(source, "dram") == 0;
++        const bool valid_source = !source || source[0] == '\0' || request_dram || strcmp(source, "file") == 0;
++        if (!valid_source) {
++            fprintf(stderr, "[moe-io] invalid LLAMA_MOE_EXPERT_SOURCE=%s; using file\n", source);
++        }
++#if !defined(_WIN32)
++        if (request_dram && !map_dram_source()) {
++            fprintf(stderr, "[moe-io] DRAM source unavailable; using file\n");
++        }
++#else
++        if (request_dram) {
++            fprintf(stderr, "[moe-io] DRAM source is unsupported on Windows; using file\n");
++        }
++#endif
++        const bool use_dram =
++#if !defined(_WIN32)
++                request_dram && dram_base;
++#else
++                false;
++#endif
++        if (!use_dram) {
++            fprintf(stderr, "[moe-io] source=file\n");
++        }
++
+         stop_flag.store(false, std::memory_order_relaxed);
+         thread = std::thread(&io_worker::run, this);
+     }
+@@ -237,6 +323,13 @@ struct io_worker {
+         stop_flag.store(true, std::memory_order_relaxed);
+         queue.cv.notify_all();
+         if (thread.joinable()) thread.join();
++#if !defined(_WIN32)
++        if (dram_base) {
++            munmap(dram_base, dram_size);
++            dram_base = nullptr;
++            dram_size = 0;
++        }
++#endif
+         if (fp) { fclose(fp); fp = nullptr; }
+         pool.shutdown();
+     }
