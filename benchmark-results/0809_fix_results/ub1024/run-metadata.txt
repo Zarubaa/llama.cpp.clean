@@ -1,0 +1,26 @@
+started=2026-08-05T17:04:31+08:00
+container=llama-cpp-clean-dev
+stable_idle_seconds=60
+numa_gate=warn
+gpu_index=3
+cuda_visible_devices=3
+cpu_list=32-63,96-127
+ubatch=1024
+repo=/home/chaoyang.zhang/docker_workspace/projects/llama.cpp.clean
+branch=0805_dram-bench
+commit=9f0199dbb990e89e600f3dce43629d18ef355bed
+model=/workspace/models/Qwen3.6-35B-A3B-UD-Q4_K_M.moe.gguf
+model_sha256=4674317e422518acafef023522768e25a42b58e22f960e5a83133bedd0cd14b4
+prompt_file=/workspace/benchmark-results/new-result/prompts/normal-long-prompt.zh-en.txt
+prompt_sha256=78fd02cac487c229f9e2399ea35905847dd1823a641cca7f762facc714ea1e80
+benchmark_binary=/workspace/build-moe/bin/llama-moe-bench
+benchmark_binary_sha256=d0c6ba506f426610621d33b715bc47ecf1029e5d6c5105d32c68b43ed95dd306
+host_gpu_apps_at_start
+
+host_gpu_apps_at_start_end
+3, GPU-c3fa138b-f509-135b-d75b-ff246d1a24d0, NVIDIA L20, 00000000:D8:00.0, 46068 MiB, 575.64.03
+git_status_begin
+ M tools/moe-bench/main.cpp
+?? benchmark-results/0809_fix_results/
+git_status_end
+completed=2026-08-05T17:13:14+08:00

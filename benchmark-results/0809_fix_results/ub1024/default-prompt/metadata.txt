@@ -1,0 +1,21 @@
+case=default-prompt
+started=2026-08-05T17:08:43+08:00
+model=/workspace/models/Qwen3.6-35B-A3B-UD-Q4_K_M.moe.gguf
+prompt_mode=default-prompt
+gpu_index=3
+cuda_visible_devices=3
+cpu_list=32-63,96-127
+ubatch=1024
+page_cache_before=before_warm=0 total=22135021024 after_warm=22135021568
+gpu_before=2026/08/05 17:08:43.485, 0 MiB, 45458 MiB, 0 %, 33, 35.80 W
+command=taskset -c 32-63\,96-127 env CUDA_VISIBLE_DEVICES=3 /workspace/build-moe/bin/llama-moe-bench --model /workspace/models/Qwen3.6-35B-A3B-UD-Q4_K_M.moe.gguf -ngl 99 -c 4096 --pp 1024 --tg 1024 --repeat 1 -ub 1024 --moe-cache-vram-mb 8000 --moe-predictor lru --moe-host-cache off --moe-host-cache-preload none --page-cache-policy natural --moe-profile-csv /workspace/benchmark-results/0809_fix_results/ub1024/default-prompt/profile.csv --moe-profile-summary /workspace/benchmark-results/0809_fix_results/ub1024/default-prompt/summary.txt --token-trace /workspace/benchmark-results/0809_fix_results/ub1024/default-prompt/tokens.csv 
+finished=2026-08-05T17:09:00+08:00
+exit_code=0
+page_cache_after=22135021568 22135021024
+gpu_after=2026/08/05 17:09:00.289, 0 MiB, 45458 MiB, 0 %, 38, 83.75 W
+host_gpu_apps_after
+
+host_gpu_apps_after_end
+numa_n0_pages=18655
+numa_n1_pages=334712
+numa_local_pct=94.721

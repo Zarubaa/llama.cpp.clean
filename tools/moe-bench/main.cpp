@@ -383,12 +383,12 @@ static std::string build_summary(
     return out.str();
 }
 
-static llama_token greedy_token(llama_context * ctx, int vocab_size) {
-    float * logits = llama_get_logits_ith(ctx, 0);
+static bool greedy_token(llama_context * ctx, int vocab_size, llama_token & token) {
+    float * logits = llama_get_logits_ith(ctx, -1);
     if (!logits) {
-        return 0;
+        return false;
     }
-    llama_token token = 0;
+    token = 0;
     float max_logit = logits[0];
     for (int v = 1; v < vocab_size; ++v) {
         if (logits[v] > max_logit) {
@@ -396,14 +396,14 @@ static llama_token greedy_token(llama_context * ctx, int vocab_size) {
             token = v;
         }
     }
-    return token;
+    return true;
 }
 
 static bool write_logits_record(std::ofstream & out, llama_context * ctx, int repeat, int step, int vocab_size) {
     if (!out.is_open()) {
         return true;
     }
-    float * logits = llama_get_logits(ctx);
+    float * logits = llama_get_logits_ith(ctx, -1);
     if (!logits) {
         return false;
     }
@@ -599,23 +599,23 @@ int main(int argc, char ** argv) {
 
     const llama_vocab * vocab = llama_model_get_vocab(model);
     const int vocab_size = llama_vocab_n_tokens(vocab);
-    const int required_prompt_tokens = -llama_tokenize(vocab,
+    const int source_prompt_tokens = -llama_tokenize(vocab,
             prompt_text.c_str(), (int) prompt_text.size(),
             nullptr, 0, true, true);
-    if (required_prompt_tokens <= 0) {
+    if (source_prompt_tokens <= 0) {
         fprintf(stderr, "failed to size prompt tokenization\n");
         llama_free(ctx);
         llama_model_free(model);
         llama_backend_free();
         return 1;
     }
-    std::vector<llama_token> prompt_tokens((size_t) required_prompt_tokens);
+    std::vector<llama_token> prompt_tokens((size_t) source_prompt_tokens);
     int n_prompt_tokens = llama_tokenize(vocab,
             prompt_text.c_str(), (int) prompt_text.size(),
             prompt_tokens.data(), (int) prompt_tokens.size(), true, true);
-    if (n_prompt_tokens < 0) {
+    if (n_prompt_tokens != source_prompt_tokens) {
         fprintf(stderr, "failed to tokenize prompt: required=%d result=%d\n",
-                required_prompt_tokens, n_prompt_tokens);
+                source_prompt_tokens, n_prompt_tokens);
         llama_free(ctx);
         llama_model_free(model);
         llama_backend_free();
@@ -623,7 +623,20 @@ int main(int argc, char ** argv) {
     }
     if (n_prompt_tokens > p.n_prompt) {
         n_prompt_tokens = p.n_prompt;
+        prompt_tokens.resize((size_t) n_prompt_tokens);
     }
+    uint64_t prompt_token_hash = 1469598103934665603ULL;
+    for (llama_token prompt_token : prompt_tokens) {
+        const uint32_t value = (uint32_t) prompt_token;
+        for (int byte = 0; byte < 4; ++byte) {
+            prompt_token_hash ^= (uint8_t) (value >> (byte * 8));
+            prompt_token_hash *= 1099511628211ULL;
+        }
+    }
+    fprintf(stderr, "[moe-bench] prompt source=%s bytes=%zu source_tokens=%d used_tokens=%d token_hash=%016llx\n",
+            p.prompt_file.empty() ? "inline" : p.prompt_file.c_str(),
+            prompt_text.size(), source_prompt_tokens, n_prompt_tokens,
+            (unsigned long long) prompt_token_hash);
 
     if (p.moe_hot_start) {
         const uint32_t n_slots = llama_moe::n_slots_per_layer();
@@ -671,6 +684,10 @@ int main(int argc, char ** argv) {
             exit_code = 1;
         } else {
             token_trace << "repeat,step,token\n";
+            if (!token_trace) {
+                fprintf(stderr, "failed to write token trace header: %s\n", p.token_trace.c_str());
+                exit_code = 1;
+            }
         }
     }
     std::ofstream logits_bin;
@@ -682,6 +699,10 @@ int main(int argc, char ** argv) {
         } else {
             const char magic[8] = {'M', 'O', 'E', 'L', 'O', 'G', '1', '\0'};
             logits_bin.write(magic, sizeof(magic));
+            if (!logits_bin) {
+                fprintf(stderr, "failed to write logits output header: %s\n", p.logits_bin.c_str());
+                exit_code = 1;
+            }
         }
     }
 
@@ -749,6 +770,11 @@ int main(int argc, char ** argv) {
         const llama_moe::profile_snapshot profile = llama_moe::get_profile_snapshot();
         std::string summary = llama_moe::format_summary(summary_ctx, profile);
         summary += format_page_cache_metrics(page_cache_metrics);
+        summary += "prompt source tokens: " + std::to_string(source_prompt_tokens) + '\n';
+        summary += "prompt used tokens: " + std::to_string(n_prompt_tokens) + '\n';
+        std::ostringstream token_hash_stream;
+        token_hash_stream << std::hex << std::setw(16) << std::setfill('0') << prompt_token_hash;
+        summary += "prompt token hash: " + token_hash_stream.str() + '\n';
 
         if (print_stdout) {
             fputc('\n', stdout);
@@ -807,16 +833,27 @@ int main(int argc, char ** argv) {
             exit_code = 1;
             break;
         }
+        llama_token token = 0;
+        if (!greedy_token(ctx, vocab_size, token)) {
+            fprintf(stderr, "failed to retrieve final prefill logits (rep %d)\n", rep);
+            exit_code = 1;
+            break;
+        }
+        const double t1 = now_ms();
+        const double measured_ttft_ms = t1 - t0;
+
         update_vram_peak();
         dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
-        const double t1 = now_ms();
         host_ready_bytes_after_prefill = llama_moe::host_cache_get_snapshot().ready_bytes;
-        const double measured_ttft_ms = t1 - t0;
-        const double page_cache_sample_begin_ms = now_ms();
         page_cache_metrics.after_prefill = page_cache_residency(p.model);
         page_cache_metrics.after_prefill_io = process_io_current();
         page_cache_metrics.process_start_to_prefill_end_ms = t1 - process_start_ms;
-        const double page_cache_sample_ms = now_ms() - page_cache_sample_begin_ms;
+
+        if (!write_logits_record(logits_bin, ctx, rep, 0, vocab_size)) {
+            fprintf(stderr, "failed to write prefill logits\n");
+            exit_code = 1;
+            break;
+        }
         ttft_ms.push_back(measured_ttft_ms);
         const bool measured_prefill_warm = !p.moe_reset_cache_between_repeats && (p.moe_warm_cache || rep > 0);
         if (measured_prefill_warm) {
@@ -826,13 +863,13 @@ int main(int argc, char ** argv) {
         }
         write_summary(false);
 
-        if (!write_logits_record(logits_bin, ctx, rep, 0, vocab_size)) {
-            fprintf(stderr, "failed to write prefill logits\n");
-            exit_code = 1;
-            break;
+        std::vector<llama_token> trace_tokens;
+        if (token_trace) {
+            trace_tokens.resize((size_t) p.n_gen + 1);
+            trace_tokens[0] = token;
         }
-        llama_token token = greedy_token(ctx, vocab_size);
-        if (token_trace) token_trace << rep << ',' << 0 << ',' << token << '\n';
+        const double decode_t0 = now_ms();
+        int completed_gen = 0;
         for (int gen = 0; gen < p.n_gen; ++gen) {
             batch = llama_batch_get_one(&token, 1);
             llama_moe::set_profile_request_context(rep, gen + 1, "decode");
@@ -841,26 +878,60 @@ int main(int argc, char ** argv) {
                 exit_code = 1;
                 break;
             }
+            if (!greedy_token(ctx, vocab_size, token)) {
+                fprintf(stderr, "failed to retrieve decode logits at gen %d (rep %d)\n", gen, rep);
+                exit_code = 1;
+                break;
+            }
             if (!write_logits_record(logits_bin, ctx, rep, gen + 1, vocab_size)) {
                 fprintf(stderr, "failed to write decode logits at gen %d\n", gen);
                 exit_code = 1;
                 break;
             }
-            token = greedy_token(ctx, vocab_size);
-            if (token_trace) token_trace << rep << ',' << gen + 1 << ',' << token << '\n';
-            update_vram_peak();
-            dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
+            if (token_trace) {
+                trace_tokens[(size_t) gen + 1] = token;
+            }
+            ++completed_gen;
         }
 
         const double t2 = now_ms();
+        if (exit_code != 0 || completed_gen != p.n_gen) {
+            break;
+        }
+        if (token_trace) {
+            for (size_t step = 0; step < trace_tokens.size(); ++step) {
+                token_trace << rep << ',' << step << ',' << trace_tokens[step] << '\n';
+            }
+            if (!token_trace) {
+                fprintf(stderr, "failed to write token trace for rep %d\n", rep);
+                exit_code = 1;
+                break;
+            }
+        }
+        tpot_ms.push_back((t2 - decode_t0) / completed_gen);
+        total_ms.push_back(measured_ttft_ms + (t2 - decode_t0));
+
+        update_vram_peak();
+        dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
         host_ready_bytes_after_decode = llama_moe::host_cache_get_snapshot().ready_bytes;
         page_cache_metrics.after_decode = page_cache_residency(p.model);
         page_cache_metrics.after_decode_io = process_io_current();
-        tpot_ms.push_back((t2 - t1 - page_cache_sample_ms) / p.n_gen);
-        total_ms.push_back(t2 - t0 - page_cache_sample_ms);
-        update_vram_peak();
-        dram_peak_bytes = std::max(dram_peak_bytes, process_dram_peak_bytes());
         write_summary(false);
+    }
+
+    if (token_trace.is_open()) {
+        token_trace.flush();
+        if (!token_trace) {
+            fprintf(stderr, "failed to flush token trace: %s\n", p.token_trace.c_str());
+            exit_code = 1;
+        }
+    }
+    if (logits_bin.is_open()) {
+        logits_bin.flush();
+        if (!logits_bin) {
+            fprintf(stderr, "failed to flush logits output: %s\n", p.logits_bin.c_str());
+            exit_code = 1;
+        }
     }
 
     if (!llama_moe::flush_predictor()) {

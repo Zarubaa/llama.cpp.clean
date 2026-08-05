@@ -1,0 +1,5 @@
+case	prompt_source	source_tokens	used_tokens	token_hash	first_token	pp	tg	ubatch	vram_cache_mib	ttft_ms	prefill_tok_s	tpot_ms	decode_tok_s	total_ms	prefill_hit_pct	decode_hit_pct	decode_source_gib	total_source_gib	physical_read_bytes	numa_local_pct	exit_code
+default-prompt	generated-inline	2049	1024	d702a11d89198696	21251	1024	1024	512	8000	3197.9	320	9.31	107	12729.4	32.9	99.7	1.48	8.54	0	94.623	0
+normal-prompt	normal-long-prompt.zh-en.txt	16961	1024	318c1480f039b981	103859	1024	1024	512	8000	6999.3	146	46.31	22	54420.5	20.4	81.8	105.87	128.35	0	94.733	0
+ub1024/default-prompt	generated-inline	2049	1024	d702a11d89198696	21251	1024	1024	1024	8000	3136.0	327	9.55	105	12911.0	0.0	99.7	2.02	8.46	774144	94.721	0
+ub1024/normal-prompt	normal-long-prompt.zh-en.txt	16961	1024	318c1480f039b981	103859	1024	1024	1024	8000	5262.0	195	49.92	20	56380.5	0.0	80.5	113.77	129.03	0	94.765	0
