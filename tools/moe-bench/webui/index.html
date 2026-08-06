@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>MoE Bench</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">&#36339;&#21040;&#20027;&#20869;&#23481;</a>
+
+  <header class="app-header">
+    <div class="brand-block">
+      <h1>MoE Bench</h1>
+      <span class="branch-label">llama.cpp</span>
+    </div>
+    <div class="header-actions">
+      <div class="service-state" id="service-state" data-state="loading" role="status" aria-live="polite">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span id="service-state-label">&#27491;&#22312;&#36830;&#25509;</span>
+        <span class="service-detail" id="service-detail"></span>
+      </div>
+      <button class="button button-quiet button-icon-text" id="refresh-button" type="button" title="Refresh service and runs">
+        <span aria-hidden="true">&#8635;</span>
+        <span>&#21047;&#26032;</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="workspace" id="main-content">
+    <aside class="config-panel panel" aria-labelledby="config-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">BENCHMARK</p>
+          <h2 id="config-title">&#36816;&#34892;&#37197;&#32622;</h2>
+        </div>
+        <button class="text-button" id="defaults-button" type="button">&#24674;&#22797;&#40664;&#35748;</button>
+      </div>
+
+      <form id="run-form" novalidate>
+        <fieldset class="form-section">
+          <legend>&#25552;&#31034;&#35789;</legend>
+          <div class="segmented" id="prompt-mode-control">
+            <label>
+              <input type="radio" name="prompt_mode" value="default" checked>
+              <span>&#40664;&#35748;</span>
+            </label>
+            <label>
+              <input type="radio" name="prompt_mode" value="file">
+              <span>&#25991;&#20214;</span>
+            </label>
+            <label>
+              <input type="radio" name="prompt_mode" value="text">
+              <span>&#25991;&#26412;</span>
+            </label>
+          </div>
+          <p class="field-note prompt-note" id="default-prompt-note">&#20351;&#29992; bench &#40664;&#35748;&#25552;&#31034;&#35789;</p>
+          <p class="field-note prompt-note is-hidden" id="file-prompt-note"></p>
+          <label class="field prompt-text-field is-hidden" id="prompt-text-field">
+            <span>&#25552;&#31034;&#35789;&#20869;&#23481;</span>
+            <textarea id="prompt-text" name="prompt_text" rows="7" spellcheck="false" placeholder="Enter prompt text"></textarea>
+          </label>
+        </fieldset>
+
+        <fieldset class="form-section">
+          <legend>&#36127;&#36733;&#35268;&#27169;</legend>
+          <div class="field-grid">
+            <label class="field">
+              <span>PP</span>
+              <input id="pp" name="pp" type="number" inputmode="numeric" min="1" step="1" required>
+            </label>
+            <label class="field">
+              <span>TG</span>
+              <input id="tg" name="tg" type="number" inputmode="numeric" min="1" step="1" required>
+            </label>
+            <label class="field">
+              <span>Repeat</span>
+              <input id="repeat" name="repeat" type="number" inputmode="numeric" min="1" step="1" required>
+            </label>
+            <label class="field">
+              <span>Ubatch</span>
+              <input id="ubatch" name="ubatch" type="number" inputmode="numeric" min="1" step="1" required>
+            </label>
+            <label class="field">
+              <span>Context</span>
+              <input id="context-size" name="context_size" type="number" inputmode="numeric" min="1" step="1" required>
+            </label>
+            <label class="field">
+              <span>GPU layers</span>
+              <input id="gpu-layers" name="gpu_layers" type="number" inputmode="numeric" min="0" step="1" required>
+            </label>
+          </div>
+        </fieldset>
+
+        <fieldset class="form-section">
+          <legend>&#32531;&#23384;&#19982;&#35843;&#24230;</legend>
+          <div class="field-grid">
+            <label class="field field-wide">
+              <span>VRAM cache (MiB)</span>
+              <input id="cache-vram-mb" name="cache_vram_mb" type="number" inputmode="numeric" min="0" step="1" required>
+            </label>
+            <label class="field">
+              <span>Predictor</span>
+              <select id="predictor" name="predictor">
+                <option value="lru">LRU</option>
+                <option value="eamc">EAMC</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Host cache</span>
+              <select id="host-cache" name="host_cache">
+                <option value="off">Off</option>
+                <option value="pageable">Pageable</option>
+                <option value="pinned">Pinned</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Preload</span>
+              <select id="host-cache-preload" name="host_cache_preload">
+                <option value="none">None</option>
+                <option value="all">All</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Page cache</span>
+              <select id="page-cache-policy" name="page_cache_policy">
+                <option value="natural">Natural</option>
+                <option value="cold">Cold</option>
+                <option value="hot">Hot</option>
+              </select>
+            </label>
+          </div>
+        </fieldset>
+
+        <fieldset class="form-section switch-section">
+          <legend>&#36816;&#34892;&#21069;&#22788;&#29702;</legend>
+          <label class="switch-row">
+            <span>
+              <strong>&#37325;&#22797;&#38388;&#37325;&#32622;</strong>
+              <small>Reset cache between repeats</small>
+            </span>
+            <input id="reset-cache" name="reset_cache_between_repeats" type="checkbox" role="switch">
+          </label>
+          <label class="switch-row">
+            <span>
+              <strong>&#39044;&#28909;&#32531;&#23384;</strong>
+              <small>Warm cache</small>
+            </span>
+            <input id="warm-cache" name="warm_cache" type="checkbox" role="switch">
+          </label>
+          <label class="switch-row">
+            <span>
+              <strong>&#28909;&#21551;&#21160;</strong>
+              <small>Hot start</small>
+            </span>
+            <input id="hot-start" name="hot_start" type="checkbox" role="switch">
+          </label>
+        </fieldset>
+
+        <div class="form-error is-hidden" id="form-error" role="alert"></div>
+
+        <div class="form-actions">
+          <button class="button button-primary" id="submit-button" type="submit">
+            <span aria-hidden="true">&#9654;</span>
+            <span>&#25552;&#20132;&#27979;&#35797;</span>
+          </button>
+          <button class="button button-danger" id="cancel-button" type="button" disabled>
+            <span aria-hidden="true">&#9632;</span>
+            <span>&#21462;&#28040;&#24403;&#21069;</span>
+          </button>
+        </div>
+      </form>
+
+      <details class="runtime-details">
+        <summary>&#36816;&#34892;&#29615;&#22659;</summary>
+        <dl id="runtime-paths" class="path-list"></dl>
+      </details>
+    </aside>
+
+    <div class="content-column">
+      <section class="run-panel panel" aria-labelledby="current-run-title">
+        <div class="run-header">
+          <div>
+            <p class="eyebrow">CURRENT RUN</p>
+            <div class="title-line">
+              <h2 id="current-run-title">&#24403;&#21069;&#36816;&#34892;</h2>
+              <span class="run-id" id="current-run-id">-</span>
+            </div>
+          </div>
+          <div class="run-state-block">
+            <span class="status-badge" id="current-run-status" data-status="empty">&#26410;&#36873;&#25321;</span>
+            <span class="connection-label" id="stream-status"></span>
+          </div>
+        </div>
+
+        <div class="run-meta" id="run-meta">
+          <span><b>&#38431;&#21015;</b><span id="queue-position">-</span></span>
+          <span><b>&#32791;&#26102;</b><span id="elapsed-time">-</span></span>
+          <span><b>&#24320;&#22987;</b><span id="started-time">-</span></span>
+        </div>
+
+        <div class="empty-state" id="run-empty-state">
+          <strong>&#36873;&#25321;&#21382;&#21490;&#36816;&#34892;&#25110;&#25552;&#20132;&#26032;&#27979;&#35797;</strong>
+          <span>&#36816;&#34892;&#29366;&#24577;&#12289;&#26085;&#24535;&#19982;&#25351;&#26631;&#23558;&#22312;&#27492;&#26356;&#26032;&#12290;</span>
+        </div>
+
+        <div class="run-content is-hidden" id="run-content">
+          <div class="metric-grid" aria-label="Core metrics">
+            <div class="metric"><span>TTFT</span><strong id="metric-ttft">-</strong></div>
+            <div class="metric"><span>Prefill tok/s</span><strong id="metric-prefill">-</strong></div>
+            <div class="metric"><span>TPOT</span><strong id="metric-tpot">-</strong></div>
+            <div class="metric"><span>Decode tok/s</span><strong id="metric-decode">-</strong></div>
+            <div class="metric"><span>Total</span><strong id="metric-total">-</strong></div>
+            <div class="metric"><span>Prefill hit</span><strong id="metric-prefill-hit">-</strong></div>
+            <div class="metric"><span>Decode hit</span><strong id="metric-decode-hit">-</strong></div>
+            <div class="metric"><span>Physical reads</span><strong id="metric-physical">-</strong></div>
+          </div>
+
+          <div class="validation-banner is-hidden" id="validation-banner" role="alert"></div>
+
+          <div class="tabs" role="tablist" aria-label="Run details">
+            <button role="tab" id="tab-logs" aria-controls="panel-logs" aria-selected="true" tabindex="0" data-tab="logs">&#23454;&#26102;&#26085;&#24535;</button>
+            <button role="tab" id="tab-summary" aria-controls="panel-summary" aria-selected="false" tabindex="-1" data-tab="summary">Summary</button>
+            <button role="tab" id="tab-io" aria-controls="panel-io" aria-selected="false" tabindex="-1" data-tab="io">I/O &#35814;&#24773;</button>
+            <button role="tab" id="tab-artifacts" aria-controls="panel-artifacts" aria-selected="false" tabindex="-1" data-tab="artifacts">Trace / &#20135;&#29289;</button>
+          </div>
+
+          <div class="tab-panel" id="panel-logs" role="tabpanel" aria-labelledby="tab-logs">
+            <div class="log-grid">
+              <section class="log-pane" aria-labelledby="stdout-title">
+                <div class="log-toolbar">
+                  <span id="stdout-title">stdout</span>
+                  <button class="text-button follow-button" type="button" data-stream="stdout" aria-pressed="true">&#36319;&#38543;&#20013;</button>
+                </div>
+                <pre class="log-output" id="stdout-log" tabindex="0" aria-live="polite"></pre>
+              </section>
+              <section class="log-pane" aria-labelledby="stderr-title">
+                <div class="log-toolbar">
+                  <span id="stderr-title">stderr</span>
+                  <button class="text-button follow-button" type="button" data-stream="stderr" aria-pressed="true">&#36319;&#38543;&#20013;</button>
+                </div>
+                <pre class="log-output log-stderr" id="stderr-log" tabindex="0" aria-live="polite"></pre>
+              </section>
+            </div>
+          </div>
+
+          <div class="tab-panel is-hidden" id="panel-summary" role="tabpanel" aria-labelledby="tab-summary" hidden>
+            <div class="detail-section">
+              <h3>Command</h3>
+              <pre class="code-block" id="run-command">-</pre>
+            </div>
+            <div class="detail-section">
+              <h3>Summary</h3>
+              <pre class="code-block summary-output" id="raw-summary">-</pre>
+            </div>
+          </div>
+
+          <div class="tab-panel is-hidden" id="panel-io" role="tabpanel" aria-labelledby="tab-io" hidden>
+            <dl class="io-grid" id="io-details"></dl>
+          </div>
+
+          <div class="tab-panel is-hidden" id="panel-artifacts" role="tabpanel" aria-labelledby="tab-artifacts" hidden>
+            <div class="detail-section">
+              <h3>Token trace</h3>
+              <div id="token-trace"></div>
+            </div>
+            <div class="detail-section">
+              <h3>&#20135;&#29289;</h3>
+              <div class="artifact-list" id="artifact-list"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="history-panel panel" aria-labelledby="history-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">RUN HISTORY</p>
+            <h2 id="history-title">&#36816;&#34892;&#21382;&#21490;</h2>
+          </div>
+          <span class="history-count" id="history-count">0</span>
+        </div>
+
+        <div class="history-loading" id="history-loading" role="status">&#27491;&#22312;&#35835;&#21462;&#36816;&#34892;&#35760;&#24405;</div>
+        <div class="history-empty is-hidden" id="history-empty">&#23578;&#26080;&#36816;&#34892;&#35760;&#24405;</div>
+        <div class="history-error is-hidden" id="history-error" role="alert"></div>
+        <div class="table-wrap is-hidden" id="history-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">&#29366;&#24577;</th>
+                <th scope="col">Run ID</th>
+                <th scope="col">&#21019;&#24314;&#26102;&#38388;</th>
+                <th scope="col">&#37197;&#32622;</th>
+                <th scope="col">Prefill</th>
+                <th scope="col">Decode</th>
+                <th scope="col">&#32791;&#26102;</th>
+              </tr>
+            </thead>
+            <tbody id="history-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>
