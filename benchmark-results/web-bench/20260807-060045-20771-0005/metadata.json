@@ -1,0 +1,16 @@
+{
+  "service_version": "1",
+  "run_id": "20260807-060045-20771-0005",
+  "status": "completed",
+  "created_at": "2026-08-07T06:00:45.809Z",
+  "started_at": "2026-08-07T06:00:45.811Z",
+  "finished_at": "2026-08-07T06:03:59.144Z",
+  "pid": null,
+  "exit_code": 0,
+  "term_signal": null,
+  "validation_errors": [],
+  "bench": "/workspace/build-moe/bin/llama-moe-bench",
+  "model": "/workspace/models/Qwen3.6-35B-A3B-UD-Q4_K_M.moe.gguf",
+  "prompt_file": "/workspace/benchmark-results/new-result/prompts/normal-long-prompt.zh-en.txt",
+  "cuda_visible_devices": "3"
+}

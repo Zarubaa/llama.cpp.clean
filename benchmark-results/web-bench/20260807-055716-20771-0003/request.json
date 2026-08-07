@@ -1,0 +1,17 @@
+{
+  "prompt_mode": "file",
+  "pp": 128,
+  "tg": 64,
+  "repeat": 1,
+  "ubatch": 8,
+  "cache_vram_mb": 8000,
+  "predictor": "lru",
+  "host_cache": "pageable",
+  "host_cache_preload": "none",
+  "page_cache_policy": "natural",
+  "context_size": 4096,
+  "gpu_layers": 99,
+  "reset_cache_between_repeats": true,
+  "warm_cache": false,
+  "hot_start": false
+}
