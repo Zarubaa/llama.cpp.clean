@@ -7,6 +7,7 @@
 #include "predictor.h"
 #include "profiler.h"
 #include "runtime.h"
+#include "sere.h"
 
 #include "ggml.h"
 #include "ggml-backend.h"
@@ -113,6 +114,8 @@ struct slot_pool_state {
 
     // Phase E: predictor
     std::unique_ptr<predictor> pred;
+    sere_similarity_matrix sere_similarity;
+    sere_policy sere_mode = sere_policy::miss;
     bool pred_dirty = false;
     uint64_t token_idx = 0;
     uint64_t current_token_idx = 0;
@@ -300,7 +303,7 @@ bool debug_admission() {
 
 } // namespace
 
-void configure_slot_pool() {
+bool configure_slot_pool() {
     auto & s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
 
@@ -316,11 +319,11 @@ void configure_slot_pool() {
     s.slot_tensors.clear();
 
     if (!runtime_enabled()) {
-        return;
+        return true;
     }
     const manifest & mf = get_manifest();
     if (!mf.present || mf.n_layers == 0 || mf.n_experts_per_layer == 0) {
-        return;
+        return false;
     }
 
     s.n_slots = compute_n_slots(get_options(), mf);
@@ -363,12 +366,46 @@ void configure_slot_pool() {
     }
     s.pred->begin_request();
 
+    s.sere_similarity.clear();
+    try {
+        s.sere_mode = parse_sere_policy(opts.sere_policy);
+    } catch (const std::exception & e) {
+        LLAMA_LOG_ERROR("%s: %s\n", __func__, e.what());
+        return false;
+    }
+    if (opts.sere_top_k > 0) {
+        if (s.n_slots >= mf.n_experts_per_layer) {
+            LLAMA_LOG_ERROR("%s: SERE requires streaming mode; reduce the MoE cache budget below full residency\n",
+                    __func__);
+            return false;
+        }
+        std::string error;
+        if (!s.sere_similarity.load(opts.sere_path, error)) {
+            LLAMA_LOG_ERROR("%s: %s\n", __func__, error.c_str());
+            return false;
+        }
+        if (s.sere_similarity.n_layers() != mf.n_layers ||
+                s.sere_similarity.n_experts() != mf.n_experts_per_layer) {
+            LLAMA_LOG_ERROR("%s: SERE sidecar dimensions %ux%u do not match model %ux%u\n",
+                    __func__, s.sere_similarity.n_layers(), s.sere_similarity.n_experts(),
+                    mf.n_layers, mf.n_experts_per_layer);
+            s.sere_similarity.clear();
+            return false;
+        }
+    }
+
     s.configured = true;
 
     LLAMA_LOG_INFO("%s: slot pool configured: %u logical MoE layers x %u experts -> "
             "%u persistent slots/layer + %u shared-scratch slots (active/layer=%u, global_axis=%u)\n",
             __func__, mf.n_layers, mf.n_experts_per_layer, s.n_slots,
             s.n_scratch_slots, s.n_active_slots, s.n_global_slots);
+    if (opts.sere_top_k > 0) {
+        LLAMA_LOG_INFO("%s: SERE decode rerouting enabled: top-k=%d threshold=%.4f policy=%s metric=%u\n",
+                __func__, opts.sere_top_k, opts.sere_threshold,
+                sere_policy_name(s.sere_mode), s.sere_similarity.metric());
+    }
+    return true;
 }
 
 void reset_slot_pool() {
@@ -395,6 +432,7 @@ void reset_slot_pool() {
     s.io_scratch.clear();
     if (s.io_fp) { fclose(s.io_fp); s.io_fp = nullptr; }
     s.pred.reset();
+    s.sere_similarity.clear();
     s.pred_dirty = false;
 }
 
@@ -1292,40 +1330,69 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
     const auto topk_d2h_end = std::chrono::steady_clock::now();
     const int64_t topk_d2h_us = elapsed_us(topk_d2h_start, topk_d2h_end);
 
-    const char * phase = n_tokens > 1 ? "prefill" : "decode";
+    const profile_request_row request_row = current_profile_request_row();
+    const bool is_decode_request = request_row.phase == "decode";
+    const char * phase = is_decode_request ? "decode" : "prefill";
     if (logical == 0) {
         s.current_token_idx = s.token_idx;
     }
     const uint64_t row_token_idx = s.current_token_idx;
 
-    // Count route occurrences and rank unique experts deterministically. The
-    // ranking controls which misses get scarce EMPTY persistent slots during
-    // cache warmup; it does not change the mapping needed by this callback.
+    // Preserve the router's ordered IDs for trace comparison. SERE may replace
+    // the IDs executed by the slot pool, but it never changes router weights.
     const auto route_rank_start = std::chrono::steady_clock::now();
-    const std::vector<routed_expert> ranked = rank_routed_experts(ids, mf.n_experts_per_layer);
+    uint64_t route_hash = 1469598103934665603ull;
+    for (int32_t expert : ids) {
+        if (expert < 0 || (uint32_t) expert >= mf.n_experts_per_layer) {
+            continue;
+        }
+        const uint32_t value = (uint32_t) expert;
+        for (int shift = 0; shift < 32; shift += 8) {
+            route_hash ^= (uint8_t) (value >> shift);
+            route_hash *= 1099511628211ull;
+        }
+    }
+
+    sere_route_stats sere_stats;
+    std::vector<int32_t> rerouted_ids;
+    const std::vector<int32_t> * effective_ids = &ids;
+    const runtime_options & runtime_opts = get_options();
+    if (is_decode_request && n_tokens == 1 &&
+            runtime_opts.sere_top_k > 0 && !s.sere_similarity.empty()) {
+        std::vector<uint8_t> resident(mf.n_experts_per_layer, 0);
+        for (const auto & entry : lc.exp2slot) {
+            if (entry.first >= 0 && (uint32_t) entry.first < mf.n_experts_per_layer) {
+                resident[(size_t) entry.first] = 1;
+            }
+        }
+        rerouted_ids = sere_reroute_decode(
+                s.sere_similarity,
+                (uint32_t) logical,
+                ids,
+                (uint32_t) runtime_opts.sere_top_k,
+                runtime_opts.sere_threshold,
+                s.sere_mode,
+                resident,
+                sere_stats);
+        effective_ids = &rerouted_ids;
+    }
+
+    // Rank the effective routes. The ranking controls which misses get scarce
+    // EMPTY persistent slots during cache warmup.
+    const std::vector<routed_expert> ranked = rank_routed_experts(*effective_ids, mf.n_experts_per_layer);
     std::vector<int32_t> uniq;
     uniq.reserve(ranked.size());
     for (const routed_expert & route : ranked) {
         uniq.push_back(route.id);
     }
 
-    // Predictor observations retain the raw multiplicity. LRU assigns one
-    // step to the callback as before; EAMC now sees token-weighted iEAM counts.
+    // The predictor observes the experts actually executed and cached. Raw
+    // router decisions remain available through route_hash and SERE counters.
     std::vector<int> observed_routes;
-    observed_routes.reserve(ids.size());
-    for (int32_t e : ids) {
+    observed_routes.reserve(effective_ids->size());
+    for (int32_t e : *effective_ids) {
         if (e >= 0 && (uint32_t) e < mf.n_experts_per_layer) {
             observed_routes.push_back((int) e);
-        }
-    }
-    // FNV-1a over the ordered route IDs gives the benchmark a compact,
-    // deterministic route trace without writing every expert ID to the CSV.
-    uint64_t route_hash = 1469598103934665603ull;
-    for (int expert : observed_routes) {
-        const uint32_t value = (uint32_t) expert;
-        for (int shift = 0; shift < 32; shift += 8) {
-            route_hash ^= (uint8_t) (value >> shift);
-            route_hash *= 1099511628211ull;
         }
     }
     const auto route_rank_end = std::chrono::steady_clock::now();
@@ -1861,9 +1928,9 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
 
     int64_t slot_ids_h2d_us = 0;
     if (slot_ids_tensor && slot_ids_tensor->buffer) {
-        std::vector<int32_t> slot_ids_host(ids.size(), 0);
-        for (size_t i = 0; i < ids.size(); ++i) {
-            const int32_t e = ids[i];
+        std::vector<int32_t> slot_ids_host(effective_ids->size(), 0);
+        for (size_t i = 0; i < effective_ids->size(); ++i) {
+            const int32_t e = (*effective_ids)[i];
             auto it = call_exp2slot.find(e);
             if (it == call_exp2slot.end()) {
                 LLAMA_LOG_ERROR("moe_eval_callback: missing slot mapping after residency L%d e%d\n",
@@ -1896,14 +1963,31 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
             std::fill(s.slot_table_host.begin(), s.slot_table_host.end(), 0);
         }
     }
-    for (int32_t e : uniq) {
-        auto it = call_exp2slot.find(e);
-        if (it == call_exp2slot.end()) {
-            LLAMA_LOG_ERROR("moe_eval_callback: missing slot_table mapping after residency L%d e%d\n",
-                    logical, e);
-            GGML_ABORT("MoE-offload: missing slot_table mapping");
+    if (effective_ids == &ids) {
+        for (int32_t expert : uniq) {
+            auto it = call_exp2slot.find(expert);
+            if (it == call_exp2slot.end()) {
+                LLAMA_LOG_ERROR("moe_eval_callback: missing slot_table mapping after residency L%d e%d\n",
+                        logical, expert);
+                GGML_ABORT("MoE-offload: missing slot_table mapping");
+            }
+            s.slot_table_host[(size_t) expert] = it->second;
         }
-        s.slot_table_host[(size_t) e] = it->second;
+    } else {
+        for (size_t i = 0; i < ids.size(); ++i) {
+            const int32_t original = ids[i];
+            const int32_t effective = (*effective_ids)[i];
+            if (original < 0 || (uint32_t) original >= mf.n_experts_per_layer) {
+                continue;
+            }
+            auto it = call_exp2slot.find(effective);
+            if (it == call_exp2slot.end()) {
+                LLAMA_LOG_ERROR("moe_eval_callback: missing slot_table mapping after residency L%d e%d\n",
+                        logical, effective);
+                GGML_ABORT("MoE-offload: missing slot_table mapping");
+            }
+            s.slot_table_host[(size_t) original] = it->second;
+        }
     }
 
     // Write slot_table to the persistent GPU-resident slot_table tensor. The
@@ -1957,7 +2041,6 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
         int k_req = (int) uniq.size();
         slot_pool_state::pending_profile_row p;
         p.logical = logical;
-        const profile_request_row request_row = current_profile_request_row();
         p.row.request_idx = request_row.request_idx;
         p.row.repeat_idx = request_row.repeat_idx;
         p.row.batch_idx = request_row.batch_idx;
@@ -2009,6 +2092,14 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
         p.row.k_scratch = (uint64_t) dbg_scratch_alloc;
         p.row.route_rank_us = route_rank_us;
         p.row.route_hash = route_hash;
+        p.row.sere_secondary_routes = sere_stats.secondary_routes;
+        p.row.sere_rerouted_routes = sere_stats.rerouted_routes;
+        p.row.sere_original_miss_routes = sere_stats.original_miss_routes;
+        p.row.sere_original_unique_required = sere_stats.original_unique_required;
+        p.row.sere_original_unique_misses = sere_stats.original_unique_misses;
+        p.row.sere_rerouted_miss_routes = sere_stats.rerouted_miss_routes;
+        p.row.sere_threshold_rejects = sere_stats.threshold_rejects;
+        p.row.sere_similarity_sum = sere_stats.similarity_sum;
         p.h2d_events = std::move(h2d_events_for_row);
 
         // Phase I: record compute_begin on the compute stream right after

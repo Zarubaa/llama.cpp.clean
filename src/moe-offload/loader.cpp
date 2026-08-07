@@ -3,6 +3,7 @@
 #include "predictor.h"
 #include "host_cache.h"
 #include "runtime.h"
+#include "sere.h"
 #include "slot_pool.h"
 
 #include "gguf.h"
@@ -10,6 +11,7 @@
 #include "llama-model-loader.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <stdexcept>
 
@@ -203,6 +205,10 @@ bool configure_from_params(
     opts.profile_summary = params.moe_profile_summary ? params.moe_profile_summary : "";
     opts.host_cache = params.moe_host_cache ? params.moe_host_cache : "off";
     opts.host_cache_preload = params.moe_host_cache_preload ? params.moe_host_cache_preload : "none";
+    opts.sere_path = params.moe_sere_path ? params.moe_sere_path : "";
+    opts.sere_policy = params.moe_sere_policy ? params.moe_sere_policy : "miss";
+    opts.sere_top_k = params.moe_sere_top_k;
+    opts.sere_threshold = params.moe_sere_threshold;
     opts.oracle = params.moe_oracle;
 
     if (opts.host_cache != "off" && opts.host_cache != "pageable" && opts.host_cache != "pinned") {
@@ -217,16 +223,35 @@ bool configure_from_params(
         LLAMA_LOG_ERROR("%s: --moe-host-cache-preload=all requires pageable or pinned host cache\n", __func__);
         return false;
     }
+    if (opts.sere_top_k < 0 ||
+            (opts.sere_top_k > 0 && (uint32_t) opts.sere_top_k > mf.n_expert_used)) {
+        LLAMA_LOG_ERROR("%s: --moe-sere-top-k must be between 0 and model top-k (%u)\n",
+                __func__, mf.n_expert_used);
+        return false;
+    }
+    if (opts.sere_top_k > 0 && opts.sere_path.empty()) {
+        LLAMA_LOG_ERROR("%s: --moe-sere-top-k requires --moe-sere-path\n", __func__);
+        return false;
+    }
+    if (!std::isfinite(opts.sere_threshold) || opts.sere_threshold < 0.0f || opts.sere_threshold > 1.0f) {
+        LLAMA_LOG_ERROR("%s: --moe-sere-threshold must be between 0 and 1\n", __func__);
+        return false;
+    }
 
     try {
         parse_predictor_kind(opts.predictor);
+        parse_sere_policy(opts.sere_policy);
     } catch (const std::exception & e) {
         LLAMA_LOG_ERROR("%s: %s\n", __func__, e.what());
         return false;
     }
 
     configure_runtime(opts, mf);
-    configure_slot_pool();
+    if (!configure_slot_pool()) {
+        reset_slot_pool();
+        configure_runtime({}, mf);
+        return false;
+    }
     if (!host_cache_init(mf, opts.host_cache, opts.host_cache_preload)) {
         LLAMA_LOG_ERROR("%s: failed to initialize %s host expert cache\n",
                 __func__, opts.host_cache.c_str());

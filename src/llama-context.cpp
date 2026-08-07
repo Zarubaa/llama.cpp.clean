@@ -1784,10 +1784,10 @@ int llama_context::decode(const llama_batch & batch_inp) {
     struct llama_moe_request_guard {
         bool active = false;
 
-        llama_moe_request_guard() {
+        explicit llama_moe_request_guard(int32_t n_tokens) {
             active = llama_moe::runtime_enabled();
             if (active) {
-                llama_moe::begin_request();
+                llama_moe::begin_request(n_tokens);
             }
         }
 
@@ -1796,7 +1796,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
                 llama_moe::end_request();
             }
         }
-    } llama_moe_request_scope;
+    } llama_moe_request_scope(batch_inp.n_tokens);
 #endif
 
     const auto & vocab   = model.vocab;

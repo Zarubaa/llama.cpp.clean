@@ -71,7 +71,7 @@ const manifest & get_manifest() {
     return state().mf;
 }
 
-void begin_request() {
+void begin_request(int32_t n_tokens) {
     auto & s = state();
     bool enabled = false;
     {
@@ -82,7 +82,8 @@ void begin_request() {
             s.active_request.request_idx = s.request_idx;
             s.active_request.repeat_idx = s.repeat_idx;
             s.active_request.batch_idx = s.batch_idx;
-            s.active_request.phase = s.request_phase;
+            s.active_request.phase = s.request_phase == "unknown" ?
+                (n_tokens == 1 ? "decode" : "prefill") : s.request_phase;
             s.request_start = std::chrono::steady_clock::now();
             enabled = true;
         }

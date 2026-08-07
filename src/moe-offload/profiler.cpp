@@ -101,7 +101,23 @@ void append_profiler_breakdown(std::ostringstream & out, const char * label,
     out << "  victim_admit      " << std::setw(8)
         << safe_div((double) stats.k_victim_admit, token_total) << " experts/token\n";
     out << "  scratch           " << std::setw(8)
-        << safe_div((double) stats.k_scratch, token_total) << " experts/token\n\n";
+        << safe_div((double) stats.k_scratch, token_total) << " experts/token\n";
+    out << "  sere_secondary    " << std::setw(8)
+        << safe_div((double) stats.sere_secondary_routes, token_total) << " routes/token\n";
+    out << "  sere_original_miss" << std::setw(8)
+        << safe_div((double) stats.sere_original_miss_routes, token_total) << " routes/token\n";
+    out << "  sere_original_unique_required " << std::setw(8)
+        << safe_div((double) stats.sere_original_unique_required, token_total) << " experts/token\n";
+    out << "  sere_original_unique_misses   " << std::setw(8)
+        << safe_div((double) stats.sere_original_unique_misses, token_total) << " experts/token\n";
+    out << "  sere_rerouted     " << std::setw(8)
+        << safe_div((double) stats.sere_rerouted_routes, token_total) << " routes/token\n";
+    out << "  sere_rerouted_miss" << std::setw(8)
+        << safe_div((double) stats.sere_rerouted_miss_routes, token_total) << " routes/token\n";
+    out << "  sere_rejected     " << std::setw(8)
+        << safe_div((double) stats.sere_threshold_rejects, token_total) << " routes/token\n";
+    out << "  sere_avg_similarity " << std::setw(6)
+        << safe_div(stats.sere_similarity_sum, stats.sere_rerouted_routes) << "\n\n";
 }
 
 } // namespace
@@ -177,6 +193,14 @@ void profiler::record(const profile_row & row) {
     stats.k_victim_admit += row.k_victim_admit;
     stats.k_scratch += row.k_scratch;
     stats.route_rank_us += row.route_rank_us;
+    stats.sere_secondary_routes += row.sere_secondary_routes;
+    stats.sere_rerouted_routes += row.sere_rerouted_routes;
+    stats.sere_original_miss_routes += row.sere_original_miss_routes;
+    stats.sere_original_unique_required += row.sere_original_unique_required;
+    stats.sere_original_unique_misses += row.sere_original_unique_misses;
+    stats.sere_rerouted_miss_routes += row.sere_rerouted_miss_routes;
+    stats.sere_threshold_rejects += row.sere_threshold_rejects;
+    stats.sere_similarity_sum += row.sere_similarity_sum;
     if (row.cache_resident_experts > stats.cache_resident_peak) {
         stats.cache_resident_peak = row.cache_resident_experts;
     }
@@ -235,7 +259,15 @@ void profiler::record(const profile_row & row) {
             << row.pinned_staging_wait_us << ','
             << row.ssd_bytes << ','
             << row.ssd_reads << ','
-            << row.route_hash << '\n';
+            << row.route_hash << ','
+            << row.sere_secondary_routes << ','
+            << row.sere_rerouted_routes << ','
+            << row.sere_original_miss_routes << ','
+            << row.sere_original_unique_required << ','
+            << row.sere_original_unique_misses << ','
+            << row.sere_rerouted_miss_routes << ','
+            << row.sere_threshold_rejects << ','
+            << row.sere_similarity_sum << '\n';
     }
 }
 
@@ -284,6 +316,14 @@ void profiler::record_request(const profile_request_row & row) {
             << row.predictor_save_us << ','
             << row.profile_flush_us << ','
             << row.sidecar_write_bytes << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
             << 0 << ','
             << 0 << ','
             << 0 << ','
@@ -368,6 +408,14 @@ std::string profiler::summary() const {
     out << "predictor_save_us: " << stats.predictor_save_us << '\n';
     out << "profile_flush_us: " << stats.profile_flush_us << '\n';
     out << "sidecar_write_bytes: " << stats.sidecar_write_bytes << '\n';
+    out << "sere_secondary_routes: " << stats.sere_secondary_routes << '\n';
+    out << "sere_original_miss_routes: " << stats.sere_original_miss_routes << '\n';
+    out << "sere_original_unique_required: " << stats.sere_original_unique_required << '\n';
+    out << "sere_original_unique_misses: " << stats.sere_original_unique_misses << '\n';
+    out << "sere_rerouted_routes: " << stats.sere_rerouted_routes << '\n';
+    out << "sere_rerouted_miss_routes: " << stats.sere_rerouted_miss_routes << '\n';
+    out << "sere_threshold_rejects: " << stats.sere_threshold_rejects << '\n';
+    out << "sere_similarity_sum: " << stats.sere_similarity_sum << '\n';
     return out.str();
 }
 
@@ -406,6 +454,12 @@ std::string format_summary(
     out << "predictor: " << std::left << std::setw(8) << ctx.predictor << std::right
         << "  cache: " << ctx.cache_mb << " MB"
         << "   ssd: " << ctx.storage << '\n';
+    if (ctx.sere_top_k > 0) {
+        out << "SERE: top-k=" << ctx.sere_top_k
+            << "  threshold=" << ctx.sere_threshold
+            << "  policy=" << ctx.sere_policy
+            << "  scope=single-token decode requests\n";
+    }
     out << "n_prompt: " << ctx.n_prompt << "  n_gen: " << ctx.n_gen << "  repeats: " << ctx.n_repeat << "\n\n";
     if (ctx.n_ubatch > 0) {
         out << "ubatch: requested=" << ctx.n_ubatch_requested
@@ -436,16 +490,31 @@ std::string format_summary(
         << "   " << std::setw(6) << std::setprecision(0) << decode_tok_s << "\n\n";
 
     out << std::fixed << std::setprecision(1);
-    out << "cache hit rate (prefill): " << hit_rate_percent(profile.prefill) << "%\n";
-    out << "cache hit rate (decode): " << hit_rate_percent(profile.decode) << "%\n";
-    out << "route hit coverage (prefill): "
+    const char * effective_suffix = ctx.sere_top_k > 0 ? ", effective" : "";
+    out << "cache hit rate (prefill" << effective_suffix << "): " << hit_rate_percent(profile.prefill) << "%\n";
+    out << "cache hit rate (decode" << effective_suffix << "): " << hit_rate_percent(profile.decode) << "%\n";
+    out << "route hit coverage (prefill" << effective_suffix << "): "
         << route_coverage_percent(profile.prefill.routes_hit, profile.prefill.routes_required) << "%\n";
-    out << "route persistent coverage (prefill): "
+    out << "route persistent coverage (prefill" << effective_suffix << "): "
         << route_coverage_percent(profile.prefill.routes_persistent, profile.prefill.routes_required) << "%\n";
-    out << "route hit coverage (decode): "
+    out << "route hit coverage (decode" << effective_suffix << "): "
         << route_coverage_percent(profile.decode.routes_hit, profile.decode.routes_required) << "%\n";
-    out << "route persistent coverage (decode): "
+    out << "route persistent coverage (decode" << effective_suffix << "): "
         << route_coverage_percent(profile.decode.routes_persistent, profile.decode.routes_required) << "%\n";
+    if (ctx.sere_top_k > 0) {
+        const uint64_t raw_unique_hits = profile.decode.sere_original_unique_required >=
+                profile.decode.sere_original_unique_misses
+            ? profile.decode.sere_original_unique_required - profile.decode.sere_original_unique_misses
+            : 0;
+        const uint64_t raw_route_hits = profile.decode.routes_required >=
+                profile.decode.sere_original_miss_routes
+            ? profile.decode.routes_required - profile.decode.sere_original_miss_routes
+            : 0;
+        out << "cache hit rate (decode, original unique): "
+            << route_coverage_percent(raw_unique_hits, profile.decode.sere_original_unique_required) << "%\n";
+        out << "route hit coverage (decode, original): "
+            << route_coverage_percent(raw_route_hits, profile.decode.routes_required) << "%\n";
+    }
     out << "SSD bytes read (decode): " << std::setprecision(2) << bytes_to_gib(profile.decode.ssd_bytes)
         << " GB  (avg " << bytes_to_mib(decode_bytes_per_token) << " MB/token)\n";
     out << "TTFT: " << std::setprecision(1) << ctx.ttft_ms << " ms\n";
@@ -561,6 +630,14 @@ profile_phase_stats profiler::total() const {
     stats.k_victim_admit = prefill_stats.k_victim_admit + decode_stats.k_victim_admit;
     stats.k_scratch = prefill_stats.k_scratch + decode_stats.k_scratch;
     stats.route_rank_us = prefill_stats.route_rank_us + decode_stats.route_rank_us;
+    stats.sere_secondary_routes = prefill_stats.sere_secondary_routes + decode_stats.sere_secondary_routes;
+    stats.sere_rerouted_routes = prefill_stats.sere_rerouted_routes + decode_stats.sere_rerouted_routes;
+    stats.sere_original_miss_routes = prefill_stats.sere_original_miss_routes + decode_stats.sere_original_miss_routes;
+    stats.sere_original_unique_required = prefill_stats.sere_original_unique_required + decode_stats.sere_original_unique_required;
+    stats.sere_original_unique_misses = prefill_stats.sere_original_unique_misses + decode_stats.sere_original_unique_misses;
+    stats.sere_rerouted_miss_routes = prefill_stats.sere_rerouted_miss_routes + decode_stats.sere_rerouted_miss_routes;
+    stats.sere_threshold_rejects = prefill_stats.sere_threshold_rejects + decode_stats.sere_threshold_rejects;
+    stats.sere_similarity_sum = prefill_stats.sere_similarity_sum + decode_stats.sere_similarity_sum;
     stats.request_wall_us = prefill_stats.request_wall_us + decode_stats.request_wall_us;
     stats.request_end_us = prefill_stats.request_end_us + decode_stats.request_end_us;
     stats.predictor_end_us = prefill_stats.predictor_end_us + decode_stats.predictor_end_us;
@@ -575,7 +652,7 @@ profile_phase_stats profiler::total() const {
 }
 
 void profiler::write_header() {
-    csv << "row_type,request_idx,repeat_idx,batch_idx,token_idx,phase,layer,k_required,k_hit,k_miss,ssd_read_us,h2d_us,compute_us,stall_us,pred_us,pred_observe_us,pred_score_us,callback_wall_us,topk_d2h_us,slot_ids_h2d_us,slot_table_h2d_us,eamc_rows_scored,eamc_cosine_us,eamc_score_materialize_us,eamc_score_cache_hits,eamc_score_cache_misses,cache_resident_experts,predictor,request_wall_us,request_end_us,predictor_end_us,predictor_save_us,profile_flush_us,sidecar_write_bytes,routes_required,routes_hit,routes_persistent,k_empty_admit,k_victim_admit,k_scratch,route_rank_us,host_cache_hits,host_cache_misses,host_cache_hit_bytes,host_cache_miss_bytes,host_cache_lookup_us,host_cache_fill_us,host_memcpy_us,host_memcpy_bytes,h2d_bytes,pinned_staging_wait_us,ssd_bytes,ssd_reads,route_hash\n";
+    csv << "row_type,request_idx,repeat_idx,batch_idx,token_idx,phase,layer,k_required,k_hit,k_miss,ssd_read_us,h2d_us,compute_us,stall_us,pred_us,pred_observe_us,pred_score_us,callback_wall_us,topk_d2h_us,slot_ids_h2d_us,slot_table_h2d_us,eamc_rows_scored,eamc_cosine_us,eamc_score_materialize_us,eamc_score_cache_hits,eamc_score_cache_misses,cache_resident_experts,predictor,request_wall_us,request_end_us,predictor_end_us,predictor_save_us,profile_flush_us,sidecar_write_bytes,routes_required,routes_hit,routes_persistent,k_empty_admit,k_victim_admit,k_scratch,route_rank_us,host_cache_hits,host_cache_misses,host_cache_hit_bytes,host_cache_miss_bytes,host_cache_lookup_us,host_cache_fill_us,host_memcpy_us,host_memcpy_bytes,h2d_bytes,pinned_staging_wait_us,ssd_bytes,ssd_reads,route_hash,sere_secondary_routes,sere_rerouted_routes,sere_original_miss_routes,sere_original_unique_required,sere_original_unique_misses,sere_rerouted_miss_routes,sere_threshold_rejects,sere_similarity_sum\n";
 }
 
 } // namespace llama_moe

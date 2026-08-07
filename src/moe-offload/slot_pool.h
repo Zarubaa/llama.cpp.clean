@@ -19,7 +19,7 @@ namespace llama_moe {
 // budget. In streaming mode the physical expert axis can be larger than this:
 // persistent slots are followed by transient shared-scratch slots used for
 // current-layer misses.
-void configure_slot_pool();
+bool configure_slot_pool();
 
 // Reset per-load bookkeeping (slot tensor registry). Tensors themselves live in
 // the loader's ctx_map and outlive this reset.

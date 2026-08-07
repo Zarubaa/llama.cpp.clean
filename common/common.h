@@ -593,6 +593,10 @@ struct common_params {
     std::string moe_profile_summary;
     std::string moe_host_cache        = "off";
     std::string moe_host_cache_preload = "none";
+    std::string moe_sere_path;
+    std::string moe_sere_policy       = "miss";
+    int32_t     moe_sere_top_k        = 0;
+    float       moe_sere_threshold    = 0.0f;
     bool        moe_oracle             = false;
 #endif
 

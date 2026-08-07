@@ -327,8 +327,12 @@ extern "C" {
         const char * moe_profile_summary;
         const char * moe_host_cache;
         const char * moe_host_cache_preload;
+        const char * moe_sere_path;
+        const char * moe_sere_policy;
         uint64_t     moe_cache_vram_mb;
         float        moe_cache_vram_frac;
+        int32_t      moe_sere_top_k;
+        float        moe_sere_threshold;
     #endif
 
         // Keep the booleans together to avoid misalignment during copy-by-value.

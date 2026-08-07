@@ -106,6 +106,14 @@ static void test(void) {
     argv = {"binary_name", "--no-mmap"};
     assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
 
+#ifdef LLAMA_MOE_OFFLOAD
+    argv = {"binary_name", "--moe-sere-top-k", "4x"};
+    assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
+
+    argv = {"binary_name", "--moe-sere-threshold", "0.5junk"};
+    assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
+#endif
+
 
     printf("test-arg-parser: test valid usage\n\n");
 
@@ -126,6 +134,19 @@ static void test(void) {
     assert(params.model.path == "abc.gguf");
     assert(params.n_predict == 6789);
     assert(params.n_batch == 9090);
+
+#ifdef LLAMA_MOE_OFFLOAD
+    argv = {
+        "binary_name", "--moe-sere-path", "similarity.sere",
+        "--moe-sere-top-k", "4", "--moe-sere-threshold", "0.7",
+        "--moe-sere-policy", "paper",
+    };
+    assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
+    assert(params.moe_sere_path == "similarity.sere");
+    assert(params.moe_sere_top_k == 4);
+    assert(params.moe_sere_threshold == 0.7f);
+    assert(params.moe_sere_policy == "paper");
+#endif
 
     // --draft cannot be used outside llama-speculative
     argv = {"binary_name", "--spec-draft-n-max", "123"};
