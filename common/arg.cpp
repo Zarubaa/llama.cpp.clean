@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <cinttypes>
 #include <climits>
+#include <cmath>
 #include <cstdarg>
 #include <filesystem>
 #include <fstream>
@@ -705,6 +706,14 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
 
     postprocess_cpu_params(params.speculative.draft.cpuparams,       &params.cpuparams);
     postprocess_cpu_params(params.speculative.draft.cpuparams_batch, &params.cpuparams_batch);
+
+#ifdef LLAMA_MOE_OFFLOAD
+    if (params.moe_sere_shadow &&
+            (!params.moe_offload || params.moe_sere_top_k <= 0 || params.moe_sere_path.empty())) {
+        throw std::invalid_argument(
+                "error: --moe-sere-shadow requires --moe-offload, --moe-sere-path, and --moe-sere-top-k > 0\n");
+    }
+#endif
 
     if (params.prompt_cache_all && (params.interactive || params.interactive_first)) {
         throw std::invalid_argument("error: --prompt-cache-all not supported in interactive mode yet\n");
@@ -2488,6 +2497,55 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 throw std::invalid_argument("invalid value");
             }
             params.moe_host_cache_preload = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--moe-sere-path"}, "PATH",
+        "load SERE expert similarity matrices from PATH",
+        [](common_params & params, const std::string & value) {
+            params.moe_sere_path = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--moe-sere-top-k"}, "N",
+        "retain the first N routed experts as SERE primary experts during decode (0 = disabled)",
+        [](common_params & params, const std::string & value) {
+            size_t consumed = 0;
+            const int parsed = std::stoi(value, &consumed);
+            if (consumed != value.size() || parsed < 0) {
+                throw std::invalid_argument("invalid value");
+            }
+            params.moe_sere_top_k = parsed;
+        }
+    ));
+    add_opt(common_arg(
+        {"--moe-sere-threshold"}, "F",
+        "minimum expert similarity for SERE rerouting (0 = always reroute)",
+        [](common_params & params, const std::string & value) {
+            size_t consumed = 0;
+            const float parsed = std::stof(value, &consumed);
+            if (consumed != value.size() || !std::isfinite(parsed) ||
+                    parsed < 0.0f || parsed > 1.0f) {
+                throw std::invalid_argument("invalid value");
+            }
+            params.moe_sere_threshold = parsed;
+        }
+    ));
+    add_opt(common_arg(
+        {"--moe-sere-policy"}, "{paper,miss}",
+        "SERE policy: reroute every secondary route or only cache misses",
+        [](common_params & params, const std::string & value) {
+            if (value != "paper" && value != "miss") {
+                throw std::invalid_argument("invalid value");
+            }
+            params.moe_sere_policy = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--moe-sere-shadow"},
+        "evaluate SERE mappings and counters without changing expert execution or cache state",
+        [](common_params & params) {
+            params.moe_sere_shadow = true;
         }
     ));
     add_opt(common_arg(

@@ -66,6 +66,7 @@ if (LLAMA_MOE_OFFLOAD)
         moe-offload/predictor.cpp
         moe-offload/profiler.cpp
         moe-offload/runtime.cpp
+        moe-offload/sere.cpp
         moe-offload/shared_scratch.cpp
         moe-offload/slot_pool.cpp
     )

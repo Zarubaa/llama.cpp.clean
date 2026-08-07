@@ -129,6 +129,12 @@ if (LLAMA_MOE_OFFLOAD)
     llama_build(test-moe-profiler.cpp)
     target_include_directories(test-moe-profiler PRIVATE ${PROJECT_SOURCE_DIR}/src)
     llama_test(test-moe-profiler)
+    llama_build(test-moe-runtime.cpp)
+    target_include_directories(test-moe-runtime PRIVATE ${PROJECT_SOURCE_DIR}/src)
+    llama_test(test-moe-runtime)
+    llama_build(test-moe-sere.cpp)
+    target_include_directories(test-moe-sere PRIVATE ${PROJECT_SOURCE_DIR}/src)
+    llama_test(test-moe-sere)
 endif()
 
 # build test-tokenizer-0 target once and add many tests

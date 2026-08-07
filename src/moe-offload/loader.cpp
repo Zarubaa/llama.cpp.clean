@@ -3,6 +3,7 @@
 #include "predictor.h"
 #include "host_cache.h"
 #include "runtime.h"
+#include "sere.h"
 #include "slot_pool.h"
 
 #include "gguf.h"
@@ -10,7 +11,9 @@
 #include "llama-model-loader.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <fstream>
 #include <stdexcept>
 
 namespace llama_moe {
@@ -100,9 +103,25 @@ manifest inspect_manifest(const gguf_context * ctx, const std::string & source_p
     result.present = true;
     result.source_path = source_path;
     result.data_offset = (uint64_t) gguf_get_data_offset(ctx);
+    result.architecture = read_string(ctx, "general.architecture");
+    result.model_name = read_string(ctx, "general.name");
+    read_u32(ctx, "general.file_type", result.general_file_type);
+    read_u32(ctx, "general.quantization_version", result.quantization_version);
+    {
+        std::ifstream source(source_path, std::ios::binary | std::ios::ate);
+        if (source) {
+            const std::streampos end = source.tellg();
+            if (end > std::streampos(0)) {
+                result.source_size = (uint64_t) end;
+            }
+        }
+    }
     read_u32(ctx, "moe_offload.n_moe_layers", result.n_layers);
     read_u32(ctx, "moe_offload.n_experts_per_layer", result.n_experts_per_layer);
-    read_suffix_u32(ctx, ".expert_used_count", result.n_expert_used);
+    const std::string expert_used_key = result.architecture + ".expert_used_count";
+    if (result.architecture.empty() || !read_u32(ctx, expert_used_key.c_str(), result.n_expert_used)) {
+        read_suffix_u32(ctx, ".expert_used_count", result.n_expert_used);
+    }
     read_u64(ctx, "moe_offload.expert_blob_size_max", result.expert_blob_size_max);
     result.layout = read_string(ctx, "moe_offload.layout");
 
@@ -131,6 +150,34 @@ manifest inspect_manifest(const gguf_context * ctx, const std::string & source_p
             for (size_t i = 0; i < result.experts.size(); ++i) {
                 result.experts[i].rel_offset = data[2 * i + 0];
                 result.experts[i].size = data[2 * i + 1];
+            }
+        }
+    }
+
+    const size_t tensor_layout_count = (size_t) result.n_layers * EXPERT_KIND_COUNT;
+    result.expert_tensors.resize(tensor_layout_count);
+    const int64_t n_tensors = gguf_get_n_tensors(ctx);
+    for (uint32_t logical = 0; logical < result.n_layers; ++logical) {
+        for (int kind = 0; kind < EXPERT_KIND_COUNT; ++kind) {
+            const expert_record & first = result.at(logical, 0, (expert_kind) kind);
+            if (first.size == 0) {
+                continue;
+            }
+            for (int64_t tensor_id = 0; tensor_id < n_tensors; ++tensor_id) {
+                if ((uint64_t) gguf_get_tensor_offset(ctx, tensor_id) != first.rel_offset) {
+                    continue;
+                }
+                expert_tensor_layout & tensor =
+                    result.expert_tensors[(size_t) logical * EXPERT_KIND_COUNT + (size_t) kind];
+                tensor.name = gguf_get_tensor_name(ctx, tensor_id);
+                tensor.type = (uint32_t) gguf_get_tensor_type(ctx, tensor_id);
+                tensor.rel_offset = (uint64_t) gguf_get_tensor_offset(ctx, tensor_id);
+                tensor.size = (uint64_t) gguf_get_tensor_size(ctx, tensor_id);
+                const int64_t * ne = gguf_get_tensor_ne(ctx, tensor_id);
+                for (size_t dim = 0; dim < tensor.ne.size(); ++dim) {
+                    tensor.ne[dim] = ne[dim] > 0 ? (uint64_t) ne[dim] : 0;
+                }
+                break;
             }
         }
     }
@@ -174,6 +221,14 @@ bool configure_from_params(
         return false;
     }
 
+    if (params.moe_sere_shadow &&
+            (!params.moe_offload || params.moe_sere_top_k <= 0 ||
+             params.moe_sere_path == nullptr || params.moe_sere_path[0] == '\0')) {
+        LLAMA_LOG_ERROR("%s: --moe-sere-shadow requires enabled SERE "
+                "(--moe-offload, --moe-sere-path, and --moe-sere-top-k > 0)\n", __func__);
+        return false;
+    }
+
     if (!params.moe_offload) {
         if (mf.present) {
             LLAMA_LOG_INFO("%s: MoE offload metadata detected; runtime flag is disabled\n", __func__);
@@ -203,6 +258,11 @@ bool configure_from_params(
     opts.profile_summary = params.moe_profile_summary ? params.moe_profile_summary : "";
     opts.host_cache = params.moe_host_cache ? params.moe_host_cache : "off";
     opts.host_cache_preload = params.moe_host_cache_preload ? params.moe_host_cache_preload : "none";
+    opts.sere_path = params.moe_sere_path ? params.moe_sere_path : "";
+    opts.sere_policy = params.moe_sere_policy ? params.moe_sere_policy : "paper";
+    opts.sere_top_k = params.moe_sere_top_k;
+    opts.sere_threshold = params.moe_sere_threshold;
+    opts.sere_shadow = params.moe_sere_shadow;
     opts.oracle = params.moe_oracle;
 
     if (opts.host_cache != "off" && opts.host_cache != "pageable" && opts.host_cache != "pinned") {
@@ -217,16 +277,35 @@ bool configure_from_params(
         LLAMA_LOG_ERROR("%s: --moe-host-cache-preload=all requires pageable or pinned host cache\n", __func__);
         return false;
     }
+    if (opts.sere_top_k < 0 ||
+            (opts.sere_top_k > 0 && (uint32_t) opts.sere_top_k > mf.n_expert_used)) {
+        LLAMA_LOG_ERROR("%s: --moe-sere-top-k must be between 0 and model top-k (%u)\n",
+                __func__, mf.n_expert_used);
+        return false;
+    }
+    if (opts.sere_top_k > 0 && opts.sere_path.empty()) {
+        LLAMA_LOG_ERROR("%s: --moe-sere-top-k requires --moe-sere-path\n", __func__);
+        return false;
+    }
+    if (!std::isfinite(opts.sere_threshold) || opts.sere_threshold < 0.0f || opts.sere_threshold > 1.0f) {
+        LLAMA_LOG_ERROR("%s: --moe-sere-threshold must be between 0 and 1\n", __func__);
+        return false;
+    }
 
     try {
         parse_predictor_kind(opts.predictor);
+        parse_sere_policy(opts.sere_policy);
     } catch (const std::exception & e) {
         LLAMA_LOG_ERROR("%s: %s\n", __func__, e.what());
         return false;
     }
 
     configure_runtime(opts, mf);
-    configure_slot_pool();
+    if (!configure_slot_pool()) {
+        reset_slot_pool();
+        configure_runtime({}, mf);
+        return false;
+    }
     if (!host_cache_init(mf, opts.host_cache, opts.host_cache_preload)) {
         LLAMA_LOG_ERROR("%s: failed to initialize %s host expert cache\n",
                 __func__, opts.host_cache.c_str());

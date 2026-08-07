@@ -11,7 +11,10 @@
 #include "page-cache.h"
 
 #include <algorithm>
+#include <cerrno>
+#include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -50,6 +53,11 @@ struct bench_params {
     std::string moe_profile_summary;
     std::string moe_host_cache = "off";
     std::string moe_host_cache_preload = "none";
+    std::string moe_sere_path;
+    std::string moe_sere_policy = "paper";
+    int moe_sere_top_k = 0;
+    float moe_sere_threshold = 0.0f;
+    bool moe_sere_shadow = false;
     std::string page_cache_policy = "natural";
     std::string token_trace;
     std::string logits_bin;
@@ -62,11 +70,18 @@ struct bench_params {
 };
 
 static bool parse_args(int argc, char ** argv, bench_params & p) {
+    bool parse_error = false;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         auto value_for = [&](const char * name, std::string & value) -> bool {
             const std::string key(name);
-            if (arg == key && i + 1 < argc) {
+            if (arg == key) {
+                if (i + 1 >= argc) {
+                    fprintf(stderr, "missing value for %s\n", name);
+                    parse_error = true;
+                    value.clear();
+                    return true;
+                }
                 value = argv[++i];
                 return true;
             }
@@ -81,7 +96,30 @@ static bool parse_args(int argc, char ** argv, bench_params & p) {
             if (!value_for(name, text)) {
                 return false;
             }
-            value = std::atoi(text.c_str());
+            const char * begin = text.data();
+            const char * end = begin + text.size();
+            const auto parsed = std::from_chars(begin, end, value);
+            if (text.empty() || parsed.ec != std::errc() || parsed.ptr != end) {
+                fprintf(stderr, "invalid integer value for %s: %s\n", name, text.c_str());
+                parse_error = true;
+            }
+            return true;
+        };
+        auto float_for = [&](const char * name, float & value) -> bool {
+            std::string text;
+            if (!value_for(name, text)) {
+                return false;
+            }
+            errno = 0;
+            char * end = nullptr;
+            const float parsed = std::strtof(text.c_str(), &end);
+            if (text.empty() || end != text.c_str() + text.size() || errno == ERANGE ||
+                    !std::isfinite(parsed)) {
+                fprintf(stderr, "invalid floating-point value for %s: %s\n", name, text.c_str());
+                parse_error = true;
+            } else {
+                value = parsed;
+            }
             return true;
         };
 
@@ -97,6 +135,11 @@ static bool parse_args(int argc, char ** argv, bench_params & p) {
         else if (value_for("--moe-profile-summary", p.moe_profile_summary)) {}
         else if (value_for("--moe-host-cache", p.moe_host_cache)) {}
         else if (value_for("--moe-host-cache-preload", p.moe_host_cache_preload)) {}
+        else if (value_for("--moe-sere-path", p.moe_sere_path)) {}
+        else if (int_for("--moe-sere-top-k", p.moe_sere_top_k)) {}
+        else if (value_for("--moe-sere-policy", p.moe_sere_policy)) {}
+        else if (float_for("--moe-sere-threshold", p.moe_sere_threshold)) {}
+        else if (arg == "--moe-sere-shadow") { p.moe_sere_shadow = true; }
         else if (value_for("--page-cache-policy", p.page_cache_policy)) {}
         else if (value_for("--token-trace", p.token_trace)) {}
         else if (value_for("--logits-bin", p.logits_bin)) {}
@@ -113,7 +156,7 @@ static bool parse_args(int argc, char ** argv, bench_params & p) {
     if (p.n_repeat < 1) p.n_repeat = 1;
     if (p.n_prompt < 1) p.n_prompt = 1;
     if (p.n_gen < 1) p.n_gen = 1;
-    return !p.model.empty();
+    return !parse_error && !p.model.empty();
 }
 
 static double now_ms() {
@@ -480,13 +523,22 @@ static std::string format_page_cache_metrics(const page_cache_runtime_metrics & 
 int main(int argc, char ** argv) {
     bench_params p;
     if (!parse_args(argc, argv, p)) {
-        fprintf(stderr, "Usage: llama-moe-bench --model <path> [--prompt-file PATH | -p TEXT] --pp N --tg N [--repeat N] [--moe-cache-vram-mb MB] [--moe-predictor lru|eamc] [--moe-eamc-path PATH] [--moe-profile-csv PATH] [--moe-profile-summary PATH] [--moe-host-cache off|pageable|pinned] [--moe-host-cache-preload none|all] [--page-cache-policy natural|cold|hot] [--token-trace PATH] [--logits-bin PATH] [--moe-reset-cache-between-repeats] [--moe-warm-cache] [--moe-hot-start] [-ub N]\n");
+        fprintf(stderr, "Usage: llama-moe-bench --model <path> [--prompt-file PATH | -p TEXT] --pp N --tg N [--repeat N] [--moe-cache-vram-mb MB] [--moe-predictor lru|eamc] [--moe-eamc-path PATH] [--moe-sere-path PATH --moe-sere-top-k N --moe-sere-threshold F --moe-sere-policy paper|miss [--moe-sere-shadow]] [--moe-profile-csv PATH] [--moe-profile-summary PATH] [--moe-host-cache off|pageable|pinned] [--moe-host-cache-preload none|all] [--page-cache-policy natural|cold|hot] [--token-trace PATH] [--logits-bin PATH] [--moe-reset-cache-between-repeats] [--moe-warm-cache] [--moe-hot-start] [-ub N]\n");
         return 1;
     }
     if ((p.moe_host_cache != "off" && p.moe_host_cache != "pageable" && p.moe_host_cache != "pinned") ||
             (p.moe_host_cache_preload != "none" && p.moe_host_cache_preload != "all") ||
             (p.moe_host_cache == "off" && p.moe_host_cache_preload != "none")) {
         fprintf(stderr, "invalid host cache configuration\n");
+        return 1;
+    }
+    if (p.moe_sere_top_k < 0 ||
+            (p.moe_sere_top_k > 0 && p.moe_sere_path.empty()) ||
+            !std::isfinite(p.moe_sere_threshold) ||
+            p.moe_sere_threshold < 0.0f || p.moe_sere_threshold > 1.0f ||
+            (p.moe_sere_policy != "paper" && p.moe_sere_policy != "miss") ||
+            (p.moe_sere_shadow && (p.moe_sere_top_k <= 0 || p.moe_sere_path.empty()))) {
+        fprintf(stderr, "invalid SERE configuration\n");
         return 1;
     }
     page_cache_policy cache_policy;
@@ -564,6 +616,11 @@ int main(int argc, char ** argv) {
     model_params.moe_profile_summary = nullptr;
     model_params.moe_host_cache = p.moe_host_cache.c_str();
     model_params.moe_host_cache_preload = p.moe_host_cache_preload.c_str();
+    model_params.moe_sere_path = p.moe_sere_path.empty() ? nullptr : p.moe_sere_path.c_str();
+    model_params.moe_sere_policy = p.moe_sere_policy.c_str();
+    model_params.moe_sere_top_k = p.moe_sere_top_k;
+    model_params.moe_sere_threshold = p.moe_sere_threshold;
+    model_params.moe_sere_shadow = p.moe_sere_shadow;
 
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx = p.n_ctx;
@@ -753,6 +810,10 @@ int main(int argc, char ** argv) {
         summary_ctx.dram_locked_bytes = mem.locked_bytes;
         summary_ctx.host_cache_mode = host.mode;
         summary_ctx.host_cache_preload = host.preload;
+        summary_ctx.sere_policy = p.moe_sere_policy;
+        summary_ctx.sere_top_k = p.moe_sere_top_k;
+        summary_ctx.sere_threshold = p.moe_sere_threshold;
+        summary_ctx.sere_shadow = p.moe_sere_shadow;
         summary_ctx.host_cache_capacity_bytes = host.capacity_bytes;
         summary_ctx.host_cache_data_bytes = host.data_bytes;
         summary_ctx.host_cache_ready_blobs = host.ready_blobs;

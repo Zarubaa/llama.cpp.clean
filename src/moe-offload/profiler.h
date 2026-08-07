@@ -56,6 +56,14 @@ struct profile_row {
     uint64_t k_scratch = 0;
     int64_t route_rank_us = 0;
     uint64_t route_hash = 0;
+    uint64_t sere_secondary_routes = 0;
+    uint64_t sere_rerouted_routes = 0;
+    uint64_t sere_original_miss_routes = 0;
+    uint64_t sere_original_unique_required = 0;
+    uint64_t sere_original_unique_misses = 0;
+    uint64_t sere_rerouted_miss_routes = 0;
+    uint64_t sere_threshold_rejects = 0;
+    double sere_similarity_sum = 0.0;
 };
 
 struct profile_request_row {
@@ -119,6 +127,14 @@ struct profile_phase_stats {
     uint64_t k_victim_admit = 0;
     uint64_t k_scratch = 0;
     int64_t route_rank_us = 0;
+    uint64_t sere_secondary_routes = 0;
+    uint64_t sere_rerouted_routes = 0;
+    uint64_t sere_original_miss_routes = 0;
+    uint64_t sere_original_unique_required = 0;
+    uint64_t sere_original_unique_misses = 0;
+    uint64_t sere_rerouted_miss_routes = 0;
+    uint64_t sere_threshold_rejects = 0;
+    double sere_similarity_sum = 0.0;
 };
 
 struct profile_snapshot {
@@ -163,6 +179,10 @@ struct profile_summary_context {
     uint64_t dram_locked_bytes = 0;
     std::string host_cache_mode = "off";
     std::string host_cache_preload = "none";
+    std::string sere_policy = "paper";
+    int sere_top_k = 0;
+    float sere_threshold = 0.0f;
+    bool sere_shadow = false;
     uint64_t host_cache_capacity_bytes = 0;
     uint64_t host_cache_data_bytes = 0;
     uint64_t host_cache_ready_blobs = 0;

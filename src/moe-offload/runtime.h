@@ -22,6 +22,11 @@ struct runtime_options {
     std::string profile_summary;
     std::string host_cache = "off";
     std::string host_cache_preload = "none";
+    std::string sere_path;
+    std::string sere_policy = "paper";
+    int32_t sere_top_k = 0;
+    float sere_threshold = 0.0f;
+    bool sere_shadow = false;
     bool oracle = false;
 };
 
@@ -31,7 +36,7 @@ bool runtime_enabled();
 const runtime_options & get_options();
 const manifest &        get_manifest();
 
-void begin_request();
+void begin_request(int32_t n_tokens);
 void end_request();
 LLAMA_API bool flush_predictor();
 
