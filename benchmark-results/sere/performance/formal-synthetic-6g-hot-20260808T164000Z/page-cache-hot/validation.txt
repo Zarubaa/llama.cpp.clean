@@ -1,0 +1,22 @@
+validation=PASS
+run_id=formal-synthetic-6g-hot-20260808T164000Z
+cases_expected=6
+cases_complete=6
+bench_exit_codes=all_zero
+profile_header_fields=62
+profile_layer_rows=ub512:41040,ub1024:41000
+profile_request_rows=1025_each
+token_trace_rows=1025_each
+prompt_used_tokens=1024_each
+prompt_token_hash=318c1480f039b981_each
+page_cache_samples=all_checkpoints_valid_and_100_percent
+host_cache_verification=all_zero_failures
+gpu_monitor_violations=0
+gpu_memory_gates=all_pass
+numa_gate=warn_only
+numa_local_pct=93.331-93.410
+stderr_scan=none_of_error_failed_abort_segmentation_fault
+classification=mechanism-formal-sized-synthetic-sidecar-6g-sensitivity
+
+The NUMA warning is retained as an environmental record. It does not change
+the six case PASS classification because the run explicitly used NUMA_GATE=warn.

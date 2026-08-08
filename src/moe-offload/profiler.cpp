@@ -494,16 +494,16 @@ std::string format_summary(
         << "   " << std::setw(6) << std::setprecision(0) << decode_tok_s << "\n\n";
 
     out << std::fixed << std::setprecision(1);
-    const char * effective_suffix = ctx.sere_top_k > 0 && !ctx.sere_shadow ? ", effective" : "";
-    out << "cache hit rate (prefill" << effective_suffix << "): " << hit_rate_percent(profile.prefill) << "%\n";
-    out << "cache hit rate (decode" << effective_suffix << "): " << hit_rate_percent(profile.decode) << "%\n";
-    out << "route hit coverage (prefill" << effective_suffix << "): "
+    const char * decode_suffix = ctx.sere_top_k > 0 && !ctx.sere_shadow ? ", effective" : "";
+    out << "cache hit rate (prefill): " << hit_rate_percent(profile.prefill) << "%\n";
+    out << "cache hit rate (decode" << decode_suffix << "): " << hit_rate_percent(profile.decode) << "%\n";
+    out << "route hit coverage (prefill): "
         << route_coverage_percent(profile.prefill.routes_hit, profile.prefill.routes_required) << "%\n";
-    out << "route persistent coverage (prefill" << effective_suffix << "): "
+    out << "route persistent coverage (prefill): "
         << route_coverage_percent(profile.prefill.routes_persistent, profile.prefill.routes_required) << "%\n";
-    out << "route hit coverage (decode" << effective_suffix << "): "
+    out << "route hit coverage (decode" << decode_suffix << "): "
         << route_coverage_percent(profile.decode.routes_hit, profile.decode.routes_required) << "%\n";
-    out << "route persistent coverage (decode" << effective_suffix << "): "
+    out << "route persistent coverage (decode" << decode_suffix << "): "
         << route_coverage_percent(profile.decode.routes_persistent, profile.decode.routes_required) << "%\n";
     if (ctx.sere_top_k > 0) {
         const uint64_t raw_unique_hits = profile.decode.sere_original_unique_required >=

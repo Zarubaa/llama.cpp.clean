@@ -1,0 +1,1 @@
+run	vram_mb	ubatch	case	status	ttft_ms	tpot_ms	total_ms	decode_tok_s	decode_hit_pct	decode_ssd_gib	ssd_reads	numa_local_pct	page_cache_after_prepare_pct	prompt_token_hash	case_dir

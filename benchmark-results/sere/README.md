@@ -17,6 +17,12 @@ integration on branch `0808_SERE`.
   It does not reduce top-k from eight routes to `S` computations.
 - With one decode token per request, `paper` is the batch-size-one degeneration
   of the paper algorithm. It is not the paper's batch-union execution scheme.
+- `--moe-sere-shadow` computes the SERE mapping and counters but executes the
+  raw router IDs. Predictor observation, LRU/cache state, transfers, tokens and
+  logits therefore remain on the exact baseline path.
+- Shadow counters are a one-step counterfactual evaluated against the current
+  baseline cache state at each callback. They are not an independent shadow LRU
+  replay whose rerouted cache state is carried across decode tokens.
 
 The current target is:
 
@@ -97,11 +103,11 @@ The runner rejects an unset, empty, or multi-GPU `CUDA_VISIBLE_DEVICES`. It
 records the selected GPU, all GPU memory/utilization values, and compute
 processes in `gpu-snapshot-start.txt` and `gpu-snapshot-end.txt`.
 
-The script runs independent cold processes with `repeat=1` for exact LRU,
-S=8 no-op, `paper` S=4, and cache-aware `miss` S=4. It writes a timestamped
-directory under `mechanism-only/runs/`, refuses to reuse a run directory, and
-writes `validation.json` with every pass/fail result. It exits non-zero when an
-assertion fails.
+The script runs five independent cold processes with `repeat=1` for exact LRU,
+S=8 no-op, active `paper` S=4, shadow `paper` S=4, and cache-aware active
+`miss` S=4. It writes a timestamped directory under `mechanism-only/runs/`,
+refuses to reuse a run directory, and writes `validation.json` with every
+pass/fail result. It exits non-zero when an assertion fails.
 
 This is deliberately a mechanism test, not a formal performance run. It uses a
 uniform synthetic matrix, only 16 decode tokens, and writes full logits inside
@@ -114,23 +120,28 @@ Required checks after the smoke run:
 1. All prefill SERE counters are zero.
 2. S=8 has zero rerouted routes and matches the baseline token trace.
 3. `paper` S=4 has non-zero decode reroutes.
-4. `miss` reroutes only original misses.
-5. Every CSV has 62 columns, 17 request rows, one prefill request, 16 decode
-   requests, and exactly layers 0-39 once per request.
-6. Effective unique misses and profiled source-read requests decrease for S=4.
-7. All cases use the same prompt tokens and have identical prefill routing,
+4. Shadow `paper` S=4 reports non-zero counters and `mode=shadow`, while its
+   token trace, complete logits, raw route hashes, and deterministic cache/LRU/
+   transfer accounting exactly match `lru-off`.
+5. `miss` reroutes only original misses.
+6. Every one of the five CSVs has 62 columns, 17 request rows, one prefill
+   request, 16 decode requests, and exactly layers 0-39 once per request.
+7. Effective unique misses and profiled source-read requests decrease for the
+   two active S=4 cases; shadow is excluded from this reduction assertion.
+8. All cases use the same prompt tokens and have identical prefill routing,
    cache/I/O accounting, and prefill logits.
-8. Original/effective reroute accounting, source-read counts, and H2D bytes are
+9. Original/effective reroute accounting, source-read counts, and H2D bytes are
    internally consistent.
-9. Every token trace and logits file contains repeat 0 with steps 0-16.
-10. The baseline has zero SERE counters, and both GPU snapshots are present.
-11. `validation.json` records SHA256 for the model, prompt, sidecar, benchmark
+10. Every token trace and logits file contains repeat 0 with steps 0-16.
+11. The baseline has zero SERE counters, and both GPU snapshots are present.
+12. `validation.json` records SHA256 for the model, prompt, sidecar, benchmark
     binary, runner, validator, GPU snapshots, tracked Git diff, and Git status.
 
 `route_hash` is computed from original router IDs before replacement in the C++
-implementation. The smoke artifact cannot compare S=4 hashes directly with the
-baseline after logits and hidden states diverge, so this is a code invariant,
-not one of `validation.json`'s cross-run assertions.
+implementation. Active S=4 hashes cannot be compared directly with the baseline
+after logits and hidden states diverge, so that remains a code invariant. The
+shadow S=4 path does not diverge numerically, and `validation.json` therefore
+requires every one of its raw route hashes to match the baseline.
 
 An existing run can be checked again without CUDA:
 

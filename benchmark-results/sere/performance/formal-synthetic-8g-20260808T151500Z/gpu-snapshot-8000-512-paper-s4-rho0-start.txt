@@ -1,0 +1,7 @@
+recorded_utc=2026-08-08T07:19:30Z
+gpu_index=3
+cuda_visible_devices=3
+selected_gpu
+3, GPU-c3fa138b-f509-135b-d75b-ff246d1a24d0, 00000000:D8:00.0, NVIDIA L20, 46068 MiB, 0 MiB, 0 %
+all_compute_processes
+GPU-1320bb85-9ed7-48ae-7229-7d8f1e6ca252, 13458, VLLM::EngineCore, 27508 MiB

@@ -221,11 +221,19 @@ bool configure_from_params(
         return false;
     }
 
+    const bool sere_requested = params.moe_sere_shadow || params.moe_sere_top_k != 0 ||
+            (params.moe_sere_path != nullptr && params.moe_sere_path[0] != '\0') ||
+            params.moe_sere_threshold != 0.0f ||
+            (params.moe_sere_policy != nullptr && std::strcmp(params.moe_sere_policy, "paper") != 0);
+    if (sere_requested && !params.moe_offload) {
+        LLAMA_LOG_ERROR("%s: SERE parameters require --moe-offload\n", __func__);
+        return false;
+    }
     if (params.moe_sere_shadow &&
-            (!params.moe_offload || params.moe_sere_top_k <= 0 ||
-             params.moe_sere_path == nullptr || params.moe_sere_path[0] == '\0')) {
+            (params.moe_sere_top_k <= 0 || params.moe_sere_path == nullptr ||
+             params.moe_sere_path[0] == '\0')) {
         LLAMA_LOG_ERROR("%s: --moe-sere-shadow requires enabled SERE "
-                "(--moe-offload, --moe-sere-path, and --moe-sere-top-k > 0)\n", __func__);
+                "(--moe-sere-path and --moe-sere-top-k > 0)\n", __func__);
         return false;
     }
 

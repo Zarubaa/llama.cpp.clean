@@ -120,6 +120,9 @@ static void test(void) {
 
     argv = {"binary_name", "--moe-sere-shadow"};
     assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
+
+    argv = {"binary_name", "--moe-sere-top-k", "4"};
+    assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
 #endif
 
 

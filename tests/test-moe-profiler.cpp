@@ -98,7 +98,13 @@ int main() {
     summary_ctx.sere_shadow = true;
     const std::string summary = llama_moe::format_summary(summary_ctx, {});
     assert(summary.find("mode=shadow") != std::string::npos);
+    assert(summary.find("cache hit rate (prefill):") != std::string::npos);
     assert(summary.find("cache hit rate (decode, effective)") == std::string::npos);
+
+    summary_ctx.sere_shadow = false;
+    const std::string active_summary = llama_moe::format_summary(summary_ctx, {});
+    assert(active_summary.find("cache hit rate (prefill, effective)") == std::string::npos);
+    assert(active_summary.find("cache hit rate (decode, effective)") != std::string::npos);
 
     std::remove(path);
     return 0;

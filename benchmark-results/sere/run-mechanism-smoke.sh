@@ -111,6 +111,9 @@ run_case paper-s8-rho0 \
 run_case paper-s4-rho0 \
     --moe-sere-path "$sidecar" --moe-sere-top-k 4 \
     --moe-sere-threshold 0 --moe-sere-policy paper
+run_case paper-s4-rho0-shadow \
+    --moe-sere-path "$sidecar" --moe-sere-top-k 4 \
+    --moe-sere-threshold 0 --moe-sere-policy paper --moe-sere-shadow
 run_case miss-s4-rho0 \
     --moe-sere-path "$sidecar" --moe-sere-top-k 4 \
     --moe-sere-threshold 0 --moe-sere-policy miss

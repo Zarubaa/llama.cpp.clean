@@ -1,0 +1,6 @@
+run	vram_mb	ubatch	case	status	ttft_ms	tpot_ms	total_ms	decode_tok_s	decode_hit_pct	decode_ssd_gib	ssd_reads	numa_local_pct	page_cache_after_prepare_pct	prompt_token_hash	case_dir
+1	6000	512	lru	failed	6443.3	63.34	71301.3	16	75.6	142.27	239901		100.0000	318c1480f039b981	/workspace/benchmark-results/sere/performance/formal-synthetic-6g-hot-20260808T163000Z/page-cache-hot/vram-6000/ub512/lru/run-1
+1	6000	512	paper-s4	failed	6425.5	38.83	46185.7	26	72.9	78.91	133116		100.0000	318c1480f039b981	/workspace/benchmark-results/sere/performance/formal-synthetic-6g-hot-20260808T163000Z/page-cache-hot/vram-6000/ub512/paper-s4/run-1
+1	6000	512	miss-s4	invalid	6500.7	34.67	42002.4	29	85.8	67.02	112989	93.392	100.0000	318c1480f039b981	/workspace/benchmark-results/sere/performance/formal-synthetic-6g-hot-20260808T163000Z/page-cache-hot/vram-6000/ub512/miss-s4/run-1
+1	6000	1024	lru	complete	4337.1	67.82	73781.2	15	73.5	154.32	260127	93.350	100.0000	318c1480f039b981	/workspace/benchmark-results/sere/performance/formal-synthetic-6g-hot-20260808T163000Z/page-cache-hot/vram-6000/ub1024/lru/run-1
+1	6000	1024	paper-s4	invalid	4262.0	36.82	41967.9	27	76.6	68.24	115056	93.408	100.0000	318c1480f039b981	/workspace/benchmark-results/sere/performance/formal-synthetic-6g-hot-20260808T163000Z/page-cache-hot/vram-6000/ub1024/paper-s4/run-1

@@ -152,6 +152,10 @@ static bool parse_args(int argc, char ** argv, bench_params & p) {
         else if (arg == "--moe-warm-cache") { p.moe_warm_cache = true; }
         else if (arg == "--moe-hot-start") { p.moe_hot_start = true; }
         else if (value_for("-p", p.prompt)) {}
+        else {
+            fprintf(stderr, "unknown argument: %s\n", arg.c_str());
+            parse_error = true;
+        }
     }
     if (p.n_repeat < 1) p.n_repeat = 1;
     if (p.n_prompt < 1) p.n_prompt = 1;

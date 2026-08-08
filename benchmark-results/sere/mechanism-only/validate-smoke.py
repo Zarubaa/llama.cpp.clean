@@ -11,7 +11,13 @@ import subprocess
 from pathlib import Path
 
 
-CASES = ("lru-off", "paper-s8-rho0", "paper-s4-rho0", "miss-s4-rho0")
+CASES = (
+    "lru-off",
+    "paper-s8-rho0",
+    "paper-s4-rho0",
+    "paper-s4-rho0-shadow",
+    "miss-s4-rho0",
+)
 EXPECTED_LAYERS = 40
 EXPECTED_DECODE_REQUESTS = 16
 EXPECTED_REQUESTS = 1 + EXPECTED_DECODE_REQUESTS
@@ -61,6 +67,25 @@ PREFILL_COLUMNS = NOOP_COLUMNS + (
     "host_cache_misses",
     "host_cache_hit_bytes",
     "host_cache_miss_bytes",
+)
+SHADOW_EXECUTION_COLUMNS = (
+    "route_hash",
+    "k_required",
+    "k_hit",
+    "k_miss",
+    "routes_required",
+    "routes_hit",
+    "routes_persistent",
+    "k_empty_admit",
+    "k_victim_admit",
+    "k_scratch",
+    "host_cache_hits",
+    "host_cache_misses",
+    "host_cache_hit_bytes",
+    "host_cache_miss_bytes",
+    "h2d_bytes",
+    "ssd_bytes",
+    "ssd_reads",
 )
 
 
@@ -304,6 +329,9 @@ def extract_summary(path):
             raise RuntimeError(f"missing summary field {pattern!r} in {path}")
         return float(match.group(1))
 
+    sere_line = re.search(
+        r"^SERE: .*\bmode=(active|shadow)\b", text, flags=re.MULTILINE
+    )
     return {
         "ttft_ms": number(r"^TTFT: ([0-9.]+) ms$"),
         "tpot_ms": number(r"^TPOT: ([0-9.]+) ms$"),
@@ -317,6 +345,7 @@ def extract_summary(path):
         "prompt_token_hash": re.search(
             r"^prompt token hash: ([0-9a-f]+)$", text, flags=re.MULTILINE
         ).group(1),
+        "sere_mode": sere_line.group(1) if sere_line else "off",
     }
 
 
@@ -383,7 +412,7 @@ def main():
     git_identity = git_worktree_identity(repo)
     all_rows = {}
     report = {
-        "schema_version": 3,
+        "schema_version": 4,
         "classification": "mechanism-only-synthetic",
         "branch": git_identity["branch"],
         "commit": git_identity["commit"],
@@ -555,6 +584,40 @@ def main():
         report["cases"]["lru-off"]["tokens_sha256"]
         == report["cases"]["paper-s8-rho0"]["tokens_sha256"]
     )
+    shadow_case = "paper-s4-rho0-shadow"
+    shadow = all_rows[shadow_case]
+    checks["shadow_summary_mode"] = (
+        report["cases"][shadow_case]["summary"]["sere_mode"] == "shadow"
+    )
+    checks["non_shadow_summary_modes"] = (
+        report["cases"]["lru-off"]["summary"]["sere_mode"] == "off"
+        and all(
+            report["cases"][case]["summary"]["sere_mode"] == "active"
+            for case in ("paper-s8-rho0", "paper-s4-rho0", "miss-s4-rho0")
+        )
+    )
+    checks["shadow_sere_counters_nonzero"] = (
+        report["cases"][shadow_case]["all_sere_nonzero_fields"] > 0
+        and report["cases"][shadow_case]["decode_sere_sums"][
+            "sere_rerouted_routes"
+        ]
+        > 0
+    )
+    checks["shadow_token_trace_equal_baseline"] = (
+        report["cases"][shadow_case]["tokens_sha256"]
+        == report["cases"]["lru-off"]["tokens_sha256"]
+    )
+    checks["shadow_logits_equal_baseline"] = (
+        report["cases"][shadow_case]["logits_sha256"]
+        == report["cases"]["lru-off"]["logits_sha256"]
+    )
+    checks["shadow_execution_accounting_equal_baseline"] = (
+        len(base) == len(shadow)
+        and all(
+            [row[column] for row in base] == [row[column] for row in shadow]
+            for column in SHADOW_EXECUTION_COLUMNS
+        )
+    )
     report["observations"]["s4_token_traces_equal_to_baseline"] = all(
         report["cases"][case]["tokens_sha256"]
         == report["cases"]["lru-off"]["tokens_sha256"]
@@ -575,6 +638,12 @@ def main():
     checks["paper_all_secondary_rerouted"] = (
         paper["sere_secondary_routes"] > 0
         and paper["sere_secondary_routes"] == paper["sere_rerouted_routes"]
+    )
+    shadow_paper = report["cases"][shadow_case]["decode_sere_sums"]
+    checks["shadow_paper_all_secondary_rerouted"] = (
+        shadow_paper["sere_secondary_routes"] > 0
+        and shadow_paper["sere_secondary_routes"]
+        == shadow_paper["sere_rerouted_routes"]
     )
     checks["miss_only_original_misses_rerouted"] = (
         miss["sere_rerouted_routes"] > 0
@@ -606,12 +675,17 @@ def main():
         == report["cases"][case]["decode_sere_sums"][
             "sere_original_miss_routes"
         ]
-        for case in ("paper-s8-rho0", "paper-s4-rho0", "miss-s4-rho0")
+        for case in (
+            "paper-s8-rho0",
+            "paper-s4-rho0",
+            shadow_case,
+            "miss-s4-rho0",
+        )
     )
     checks["rerouted_misses_bounded_by_original_misses"] = all(
         report["cases"][case]["decode_sere_sums"]["sere_rerouted_miss_routes"]
         <= report["cases"][case]["decode_sere_sums"]["sere_original_miss_routes"]
-        for case in ("paper-s4-rho0", "miss-s4-rho0")
+        for case in ("paper-s4-rho0", shadow_case, "miss-s4-rho0")
     )
     checks["s4_original_effective_accounting_consistent"] = all(
         report["cases"][case]["decode_effective_sums"]["k_required"]

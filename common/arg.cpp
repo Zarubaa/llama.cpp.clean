@@ -708,10 +708,16 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
     postprocess_cpu_params(params.speculative.draft.cpuparams_batch, &params.cpuparams_batch);
 
 #ifdef LLAMA_MOE_OFFLOAD
+    const bool sere_requested = params.moe_sere_shadow || params.moe_sere_top_k != 0 ||
+            !params.moe_sere_path.empty() || params.moe_sere_threshold != 0.0f ||
+            params.moe_sere_policy != "paper";
+    if (sere_requested && !params.moe_offload) {
+        throw std::invalid_argument("error: SERE parameters require --moe-offload\n");
+    }
     if (params.moe_sere_shadow &&
-            (!params.moe_offload || params.moe_sere_top_k <= 0 || params.moe_sere_path.empty())) {
+            (params.moe_sere_top_k <= 0 || params.moe_sere_path.empty())) {
         throw std::invalid_argument(
-                "error: --moe-sere-shadow requires --moe-offload, --moe-sere-path, and --moe-sere-top-k > 0\n");
+                "error: --moe-sere-shadow requires --moe-sere-path and --moe-sere-top-k > 0\n");
     }
 #endif
 

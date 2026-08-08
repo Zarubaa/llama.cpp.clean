@@ -1,0 +1,48 @@
+started_utc=2026-08-08T07:48:52Z
+run_id=formal-preflight-6g-20260808T074717Z
+storage_mode=page-cache-hot
+repo=/workspace
+branch=0808_SERE
+commit=13aedd344c51fb236db98452a42e751b9c2e89e1
+container=llama-cpp-clean-dev
+inside_container=1
+model=/workspace/models/Qwen3.6-35B-A3B-UD-Q4_K_M.moe.gguf
+model_size=22135021024
+model_sha256=4674317e422518acafef023522768e25a42b58e22f960e5a83133bedd0cd14b4
+prompt=/workspace/benchmark-results/new-result/prompts/normal-long-prompt.zh-en.txt
+prompt_sha256=78fd02cac487c229f9e2399ea35905847dd1823a641cca7f762facc714ea1e80
+sidecar=/workspace/benchmark-results/sere/mechanism-only/synthetic/similarity.sere
+sidecar_sha256=e22aa8b1c505755458229f74d9bf3b166e061ff38ead2aeb2e7e66881a3fe618
+benchmark=/workspace/build-sere-cuda/bin/llama-moe-bench
+benchmark_sha256=c672e5a4e7dae700e268c451cc27ee0faa753ebbd9c151628baca86237591fd9
+gpu_index=3
+cuda_visible_devices=3
+numa_local_node=1
+cpu_list=32-63,96-127
+numa_gate=warn
+numa_min_local_pct=95.0
+page_cache_policy=hot
+host_cache=off
+host_cache_preload=none
+pp=1024
+tg=1024
+ctx=4096
+runs=1
+predictor=lru
+target_vrams=6000
+target_ubatches=512
+target_cases=lru
+target_runs=all
+git_status_begin
+ M benchmark-results/sere/README.md
+ M benchmark-results/sere/mechanism-only/validate-smoke.py
+ M benchmark-results/sere/run-mechanism-smoke.sh
+ M common/arg.cpp
+ M src/moe-offload/loader.cpp
+ M src/moe-offload/profiler.cpp
+ M tests/test-arg-parser.cpp
+ M tests/test-moe-profiler.cpp
+ M tools/moe-bench/main.cpp
+?? benchmark-results/sere/mechanism-only/runs/
+?? benchmark-results/sere/performance/
+git_status_end

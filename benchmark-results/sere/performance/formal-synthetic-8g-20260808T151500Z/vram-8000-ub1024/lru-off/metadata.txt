@@ -1,0 +1,15 @@
+case=vram-8000-ub1024/lru-off
+started=2026-08-08T15:26:02+08:00
+vram_cache_mb=8000
+ubatch=1024
+gpu_index=3
+cuda_visible_devices=3
+cpu_list=32-63,96-127
+page_cache_before=22135021568 22135021024
+page_cache_prepared=resident=22135021568 size=22135021024 pct=100.0000
+bench_sha256=c672e5a4e7dae700e268c451cc27ee0faa753ebbd9c151628baca86237591fd9
+command=taskset -c '32-63,96-127' env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES='3' '/workspace/build-sere-cuda/bin/llama-moe-bench' --model '/workspace/models/Qwen3.6-35B-A3B-UD-Q4_K_M.moe.gguf' --prompt-file '/workspace/benchmark-results/new-result/prompts/normal-long-prompt.zh-en.txt' -ngl 99 -c 4096 --pp 1024 --tg 1024 --repeat 1 -ub '1024' --moe-cache-vram-mb '8000' --moe-predictor lru --moe-host-cache off --moe-host-cache-preload none --page-cache-policy natural --moe-reset-cache-between-repeats --moe-profile-csv '/workspace/benchmark-results/sere/performance/formal-synthetic-8g-20260808T151500Z/vram-8000-ub1024/lru-off/profile.csv' --moe-profile-summary '/workspace/benchmark-results/sere/performance/formal-synthetic-8g-20260808T151500Z/vram-8000-ub1024/lru-off/summary.txt' --token-trace '/workspace/benchmark-results/sere/performance/formal-synthetic-8g-20260808T151500Z/vram-8000-ub1024/lru-off/tokens.csv'
+finished=2026-08-08T15:27:17+08:00
+exit_code=0
+page_cache_after=22135021568 22135021024
+peak_sample_rss_kib=1431568\npeak_sample_hwm_kib=1431568\npeak_sample_locked_kib=0\npeak_sample_n0_pages=24005\npeak_sample_n1_pages=333904\nnuma_local_pct=93.293

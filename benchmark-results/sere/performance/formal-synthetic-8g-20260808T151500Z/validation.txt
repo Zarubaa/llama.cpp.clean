@@ -1,0 +1,5 @@
+run_root=/home/chaoyang.zhang/docker_workspace/projects/llama.cpp.clean/benchmark-results/sere/performance/formal-synthetic-8g-20260808T151500Z
+cases=8
+prompt_hash=318c1480f039b981
+classification=mechanism-formal-sized-synthetic-sidecar
+passed=1
