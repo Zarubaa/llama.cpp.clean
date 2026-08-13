@@ -2481,13 +2481,44 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ));
     add_opt(common_arg(
-        {"--moe-host-cache-preload"}, "{none,all}",
-        "preload all expert blobs into the host DRAM cache before inference",
+        {"--moe-host-cache-preload"}, "{none,all,hotset}",
+        "preload expert blobs into the host DRAM cache before inference",
         [](common_params & params, const std::string & value) {
-            if (value != "none" && value != "all") {
+            if (value != "none" && value != "all" && value != "hotset") {
                 throw std::invalid_argument("invalid value");
             }
             params.moe_host_cache_preload = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--moe-host-cache-capacity-mb"}, "N",
+        "bounded host expert cache capacity in MiB (0 keeps historical full-cache behavior)",
+        [](common_params & params, int value) { params.moe_host_cache_capacity_mb = value; }
+    ));
+    add_opt(common_arg(
+        {"--moe-host-cache-hotset"}, "PATH",
+        "expert hotset used by --moe-host-cache-preload=hotset",
+        [](common_params & params, const std::string & value) { params.moe_host_cache_hotset = value; }
+    ));
+    add_opt(common_arg(
+        {"--moe-tier-policy"}, "{legacy,aged-lfu}",
+        "GPU/Host expert tier admission and eviction policy",
+        [](common_params & params, const std::string & value) {
+            if (value != "legacy" && value != "aged-lfu") throw std::invalid_argument("invalid value");
+            params.moe_tier_policy = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--moe-tier-half-life"}, "N",
+        "expert heat half-life in routed tokens",
+        [](common_params & params, int value) { params.moe_tier_half_life = value; }
+    ));
+    add_opt(common_arg(
+        {"--moe-decode-global-cache"}, "{on,off}",
+        "retain shared GPU slots as a cross-layer decode cache",
+        [](common_params & params, const std::string & value) {
+            if (value != "on" && value != "off") throw std::invalid_argument("invalid value");
+            params.moe_decode_global_cache = value == "on";
         }
     ));
     add_opt(common_arg(

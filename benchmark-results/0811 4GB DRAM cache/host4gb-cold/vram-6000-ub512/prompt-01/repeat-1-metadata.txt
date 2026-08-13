@@ -1,0 +1,25 @@
+mode=host4gb-cold
+prompt_id=01
+repeat=1
+page_cache_policy=hot
+host_cache=pinned
+host_cache_preload=none
+vram_cache_mb=6000
+ubatch=512
+pp=1024
+tg=1024
+model=/home/haozhe.lou/models/Qwen3.6-35B-A3B-UD-Q4_K_M.moe.gguf
+model_size=22135021024
+prompt_file=/home/haozhe.lou/llama.cpp.clean/benchmark-results/prompt-dataset-8x1024/prompt-01-storage-incident.txt
+prompt_bytes=5538
+prompt_sha256=c7bb0cd647f7d6af30f97558f0fbc430637571a9ceeb4e11ba50ef6d61704143
+binary=/home/haozhe.lou/llama.cpp.clean/build-moe/bin/llama-moe-bench
+binary_sha256=cd9d1fc6269d327f55e58c1574074ed5e4601640c3c3a19e5018066fc2a3cad1
+gpu_index=1
+cpu_list=0-31,64-95
+started=2026-08-11T17:57:24+08:00
+command=taskset -c 0-31\,64-95 env CUDA_VISIBLE_DEVICES=1 /home/haozhe.lou/llama.cpp.clean/build-moe/bin/llama-moe-bench --model /home/haozhe.lou/models/Qwen3.6-35B-A3B-UD-Q4_K_M.moe.gguf --prompt-file /home/haozhe.lou/llama.cpp.clean/benchmark-results/prompt-dataset-8x1024/prompt-01-storage-incident.txt -ngl 99 -c 4096 --pp 1024 --tg 1024 --repeat 1 -ub 512 --moe-cache-vram-mb 6000 --moe-predictor lru --moe-host-cache pinned --moe-host-cache-preload none --page-cache-policy hot --moe-profile-csv /home/haozhe.lou/llama.cpp.clean/benchmark-results/0811\ 4GB\ DRAM\ cache/host4gb-cold/vram-6000-ub512/prompt-01/repeat-1-partial-2519938-profile.csv --moe-profile-summary /home/haozhe.lou/llama.cpp.clean/benchmark-results/0811\ 4GB\ DRAM\ cache/host4gb-cold/vram-6000-ub512/prompt-01/repeat-1-partial-2519938-summary.txt --token-trace /home/haozhe.lou/llama.cpp.clean/benchmark-results/0811\ 4GB\ DRAM\ cache/host4gb-cold/vram-6000-ub512/prompt-01/repeat-1-partial-2519938-tokens.csv --moe-host-cache-capacity-mb 4096 --moe-tier-policy aged-lfu --moe-tier-half-life 128 --moe-decode-global-cache on 
+finished=2026-08-11T17:58:21+08:00
+exit_code=0
+gpu_before=2026/08/11 17:57:24.261, 3 MiB, 45455 MiB, 0 %, 2520 MHz, 77.92 W
+gpu_after=2026/08/11 17:58:21.748, 3 MiB, 45455 MiB, 0 %, 2520 MHz, 78.02 W

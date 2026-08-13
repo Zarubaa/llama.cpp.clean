@@ -23,7 +23,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <list>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -100,6 +102,24 @@ struct slot_pool_state {
         std::unordered_map<int32_t, uint64_t> fingerprints;
     };
     std::vector<layer_cache> cache;
+
+    struct heat_entry {
+        double value = 0.0;
+        uint64_t last_token = 0;
+    };
+    std::vector<std::vector<heat_entry>> heat;
+
+    struct global_cache_entry {
+        int32_t layer = -1;
+        int32_t expert = -1;
+        uint64_t touch = 0;
+    };
+    uint32_t n_decode_global_slots = 0;
+    uint32_t n_decode_temp_slots = 0;
+    bool decode_global_initialized = false;
+    uint64_t global_touch_clock = 0;
+    std::vector<global_cache_entry> decode_global_slots;
+    std::unordered_map<uint64_t, uint32_t> decode_global_map;
     // Reusable host buffer for slot_table writes (size n_expert).
     std::vector<int32_t> slot_table_host;
     // Reusable scratch for the largest expert blob (one kind).
@@ -110,6 +130,8 @@ struct slot_pool_state {
     uint64_t cache_hits = 0;
     uint64_t cache_misses = 0;
     uint64_t topk_calls = 0;
+    uint64_t global_cache_hits = 0;
+    uint64_t global_cache_misses = 0;
 
     // Phase E: predictor
     std::unique_ptr<predictor> pred;
@@ -143,6 +165,7 @@ struct slot_pool_state {
     struct inflight_h2d_buffer {
         void * pinned_buf = nullptr;
         bool owns_pinned_buf = false;
+        uint64_t host_cache_lease = 0;
         void * h2d_begin_event = nullptr;
         void * h2d_event = nullptr;
         int layer = -1;
@@ -240,6 +263,10 @@ uint32_t compute_active_slots(uint32_t persistent_slots, const manifest & mf) {
 
 uint32_t scratch_slots_from_active(uint32_t persistent_slots, uint32_t active_slots) {
     return active_slots > persistent_slots ? active_slots - persistent_slots : 0;
+}
+
+uint64_t global_expert_key(uint32_t layer, uint32_t expert) {
+    return ((uint64_t) layer << 32) | expert;
 }
 
 uint32_t compute_global_slots(uint32_t persistent_slots, uint32_t scratch_slots, const manifest & mf) {
@@ -340,12 +367,21 @@ void configure_slot_pool() {
     for (auto & lc : s.cache) {
         lc.slot_to_expert.assign(s.n_slots, -1);
     }
+    s.heat.assign(mf.n_layers, std::vector<slot_pool_state::heat_entry>(mf.n_experts_per_layer));
+    s.n_decode_temp_slots = get_options().decode_global_cache ? std::min<uint32_t>(16, s.n_scratch_slots) : 0;
+    s.n_decode_global_slots = get_options().decode_global_cache ? s.n_scratch_slots - s.n_decode_temp_slots : 0;
+    s.decode_global_slots.assign(s.n_decode_global_slots, slot_pool_state::global_cache_entry{});
+    s.decode_global_map.clear();
+    s.decode_global_initialized = false;
+    s.global_touch_clock = 0;
     s.slot_table_host.assign(mf.n_experts_per_layer, 0);
     s.io_scratch.clear();
     if (s.io_fp) { fclose(s.io_fp); s.io_fp = nullptr; }
     s.cache_hits = 0;
     s.cache_misses = 0;
     s.topk_calls = 0;
+    s.global_cache_hits = 0;
+    s.global_cache_misses = 0;
     s.token_idx = 0;
     s.current_token_idx = 0;
 
@@ -391,6 +427,12 @@ void reset_slot_pool() {
     s.topk_to_callback.clear();
     s.all_slot_tables.clear();
     s.cache.clear();
+    s.heat.clear();
+    s.decode_global_slots.clear();
+    s.decode_global_map.clear();
+    s.n_decode_global_slots = 0;
+    s.n_decode_temp_slots = 0;
+    s.decode_global_initialized = false;
     s.slot_table_host.clear();
     s.io_scratch.clear();
     if (s.io_fp) { fclose(s.io_fp); s.io_fp = nullptr; }
@@ -409,9 +451,18 @@ void slot_pool_reset_cache() {
         lc.lru_it.clear();
         lc.fingerprints.clear();
     }
+    for (auto & layer : s.heat) {
+        std::fill(layer.begin(), layer.end(), slot_pool_state::heat_entry{});
+    }
+    std::fill(s.decode_global_slots.begin(), s.decode_global_slots.end(), slot_pool_state::global_cache_entry{});
+    s.decode_global_map.clear();
+    s.decode_global_initialized = false;
+    s.global_touch_clock = 0;
     s.cache_hits = 0;
     s.cache_misses = 0;
     s.topk_calls = 0;
+    s.global_cache_hits = 0;
+    s.global_cache_misses = 0;
     s.token_idx = 0;
     s.current_token_idx = 0;
 }
@@ -988,6 +1039,7 @@ int release_completed_h2d_buffers(slot_pool_state & s) {
     auto it = s.inflight_h2d.begin();
     while (it != s.inflight_h2d.end()) {
         if (!it->h2d_event || io_event_query(it->h2d_event)) {
+            host_cache_release(it->host_cache_lease);
             if (it->pinned_buf && it->owns_pinned_buf) {
                 io_release_buffer(it->pinned_buf);
             }
@@ -1005,6 +1057,7 @@ void wait_all_h2d_buffers(slot_pool_state & s) {
         if (b.h2d_event) {
             io_event_sync(b.h2d_event);
         }
+        host_cache_release(b.host_cache_lease);
         if (b.pinned_buf && b.owns_pinned_buf) {
             io_release_buffer(b.pinned_buf);
         b.pinned_buf = nullptr;
@@ -1111,6 +1164,41 @@ void lru_touch(slot_pool_state::layer_cache & lc, int32_t expert) {
     }
     lc.lru.push_front(expert);
     lc.lru_it[expert] = lc.lru.begin();
+}
+
+double heat_at(slot_pool_state & s, uint32_t layer, uint32_t expert, uint64_t now) {
+    if (layer >= s.heat.size() || expert >= s.heat[layer].size()) return 0.0;
+    auto & value = s.heat[layer][expert];
+    if (now > value.last_token && value.value > 0.0) {
+        const uint32_t half_life = std::max<uint32_t>(1, get_options().tier_half_life);
+        value.value *= std::exp2(-(double) (now - value.last_token) / (double) half_life);
+        value.last_token = now;
+    }
+    return value.value;
+}
+
+void observe_heat(
+        slot_pool_state & s,
+        uint32_t layer,
+        const std::vector<routed_expert> & routes,
+        uint64_t n_tokens,
+        uint64_t now) {
+    if (layer >= s.heat.size()) return;
+    const double denominator = (double) std::max<uint64_t>(1, n_tokens);
+    for (const routed_expert & route : routes) {
+        if (route.id < 0 || (size_t) route.id >= s.heat[layer].size()) continue;
+        auto & value = s.heat[layer][(size_t) route.id];
+        heat_at(s, layer, (uint32_t) route.id, now);
+        value.value += (double) route.count / denominator;
+        value.last_token = now;
+    }
+}
+
+void clear_decode_global_cache(slot_pool_state & s) {
+    std::fill(s.decode_global_slots.begin(), s.decode_global_slots.end(), slot_pool_state::global_cache_entry{});
+    s.decode_global_map.clear();
+    s.decode_global_initialized = false;
+    s.global_touch_clock = 0;
 }
 
 } // namespace
@@ -1293,6 +1381,13 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
     const int64_t topk_d2h_us = elapsed_us(topk_d2h_start, topk_d2h_end);
 
     const char * phase = n_tokens > 1 ? "prefill" : "decode";
+    const bool decode_phase = n_tokens == 1;
+    if (!decode_phase) {
+        clear_decode_global_cache(s);
+    } else if (!s.decode_global_initialized) {
+        clear_decode_global_cache(s);
+        s.decode_global_initialized = true;
+    }
     if (logical == 0) {
         s.current_token_idx = s.token_idx;
     }
@@ -1308,6 +1403,8 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
     for (const routed_expert & route : ranked) {
         uniq.push_back(route.id);
     }
+    const uint64_t heat_now = row_token_idx + (uint64_t) std::max<int64_t>(1, n_tokens);
+    observe_heat(s, (uint32_t) logical, ranked, (uint64_t) std::max<int64_t>(1, n_tokens), heat_now);
 
     // Predictor observations retain the raw multiplicity. LRU assigns one
     // step to the callback as before; EAMC now sees token-weighted iEAM counts.
@@ -1363,7 +1460,7 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
     // Ensure residency. Process hits first (just touch), then misses. Misses
     // use free persistent cache slots while the cache is warming; once full,
     // they use transient shared scratch before evicting non-current experts.
-    int dbg_hits = 0, dbg_misses = 0, dbg_evictions = 0, dbg_free_alloc = 0, dbg_scratch_alloc = 0;
+    int dbg_hits = 0, dbg_misses = 0, dbg_evictions = 0, dbg_free_alloc = 0, dbg_scratch_alloc = 0, dbg_global_alloc = 0;
     std::unordered_map<int32_t, int32_t> call_exp2slot;
     call_exp2slot.reserve(uniq.size());
 
@@ -1422,6 +1519,10 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
     }
 
     uint64_t routes_hit = 0;
+    uint64_t routes_global_hit = 0;
+    uint64_t global_unique_hits = 0;
+    uint64_t global_unique_misses = 0;
+    std::unordered_set<uint32_t> reserved_global_slots;
     for (const routed_expert & route : ranked) {
         const int32_t e = route.id;
         auto it = lc.exp2slot.find(e);
@@ -1430,6 +1531,25 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
             ++s.cache_hits;
             ++dbg_hits;
             routes_hit += route.count;
+            continue;
+        }
+        if (decode_phase && s.n_decode_global_slots > 0) {
+            const auto global_it = s.decode_global_map.find(global_expert_key((uint32_t) logical, (uint32_t) e));
+            if (global_it != s.decode_global_map.end()) {
+                const uint32_t global_local = global_it->second;
+                call_exp2slot[e] = (int32_t) (scratch_global_slot_begin(s, mf) + global_local);
+                s.decode_global_slots[global_local].touch = ++s.global_touch_clock;
+                reserved_global_slots.insert(global_local);
+                ++s.cache_hits;
+                ++s.global_cache_hits;
+                ++global_unique_hits;
+                ++dbg_hits;
+                routes_hit += route.count;
+                routes_global_hit += route.count;
+            } else {
+                ++s.global_cache_misses;
+                ++global_unique_misses;
+            }
         }
     }
 
@@ -1463,6 +1583,8 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
         size_t        blob_size;
         uint64_t      file_offset;
         char *        gpu_dst;
+        bool          host_admit;
+        double        heat;
     };
     std::unordered_map<uint64_t, miss_meta> miss_lookup;
     std::vector<miss_blob> miss_blobs;
@@ -1497,17 +1619,23 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
 
     const uint32_t scratch_begin = scratch_global_slot_begin(s, mf);
     const uint32_t scratch_end   = scratch_begin + s.n_scratch_slots;
-    uint32_t next_scratch_slot   = scratch_begin;
+    uint32_t next_scratch_slot   = decode_phase && s.n_decode_global_slots > 0 ?
+        scratch_begin + s.n_decode_global_slots : scratch_begin;
+    const bool aged_policy = get_options().tier_policy == "aged-lfu";
+    std::vector<std::pair<uint32_t, uint32_t>> stable_gpu_admissions;
 
     for (int32_t e : uniq) {
         if (call_exp2slot.count(e)) continue;
 
-        // Pick a slot. Free persistent slots warm the long-lived cache first.
-        // Once full, replace a non-current persistent expert using the selected
-        // predictor (LRU or EAMC). Shared scratch is only a correctness fallback
-        // when every persistent resident is needed by this same callback.
+        // Empty per-layer slots are always filled first. Once the tier is full,
+        // aged-LFU admits the candidate only when it is hotter than the coldest
+        // evictable resident. Rejected candidates continue through the global
+        // decode tier or a temporary shared slot instead of polluting GPU cache.
         int32_t slot = -1;
         bool persistent_slot = false;
+        bool global_slot = false;
+        bool host_admit = false;
+        const double candidate_heat = heat_at(s, (uint32_t) logical, (uint32_t) e, heat_now);
         for (uint32_t si = 0; si < s.n_slots; ++si) {
             if (lc.slot_to_expert[si] < 0) { slot = (int32_t) si; break; }
         }
@@ -1519,7 +1647,7 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
             // Phase E: use predictor.score for eviction (lower = evict).
             // Phase L.2: skip experts reserved earlier in this same
             // callback — their slots hold in-flight H2D data.
-            float best_score = 1e30f;
+            double best_score = std::numeric_limits<double>::infinity();
             int32_t best_victim = -1;
             const auto pred_start = std::chrono::steady_clock::now();
             // Visit the real LRU tail first. With strict score comparison this
@@ -1528,7 +1656,9 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
             for (auto it = lc.lru.rbegin(); it != lc.lru.rend(); ++it) {
                 const int32_t exp = *it;
                 if (reserved_this_call.count(exp)) continue;
-                float sc = s.pred->score(logical, exp);
+                const double sc = aged_policy ?
+                    heat_at(s, (uint32_t) logical, (uint32_t) exp, heat_now) :
+                    (double) s.pred->score(logical, exp);
                 if (best_victim < 0 || sc < best_score) {
                     best_score = sc;
                     best_victim = exp;
@@ -1536,14 +1666,18 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
             }
             const auto pred_end = std::chrono::steady_clock::now();
             pred_score_us += elapsed_us(pred_start, pred_end);
-            add_pred_stats(pred_stats, s.pred->take_score_stats());
-            if (best_victim < 0) {
+            if (!aged_policy) {
+                add_pred_stats(pred_stats, s.pred->take_score_stats());
+            }
+            if (!aged_policy && best_victim < 0) {
                 // Fall back to LRU tail, but still skip reserved-this-call.
                 for (auto it = lc.lru.rbegin(); it != lc.lru.rend(); ++it) {
                     if (!reserved_this_call.count(*it)) { best_victim = *it; break; }
                 }
             }
-            if (best_victim >= 0) {
+            const bool candidate_wins = best_victim >= 0 &&
+                (!aged_policy || candidate_heat > best_score);
+            if (candidate_wins) {
                 persistent_slot = true;
                 lc.lru.erase(lc.lru_it[best_victim]);
                 lc.lru_it.erase(best_victim);
@@ -1554,8 +1688,52 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
                 ++dbg_evictions;
             }
         }
+
+        if (slot < 0 && decode_phase && s.n_decode_global_slots > 0) {
+            int32_t global_local = -1;
+            for (uint32_t i = 0; i < s.n_decode_global_slots; ++i) {
+                if (s.decode_global_slots[i].expert < 0) {
+                    global_local = (int32_t) i;
+                    break;
+                }
+            }
+            if (global_local < 0) {
+                double victim_heat = std::numeric_limits<double>::infinity();
+                uint64_t victim_touch = std::numeric_limits<uint64_t>::max();
+                for (uint32_t i = 0; i < s.n_decode_global_slots; ++i) {
+                    if (reserved_global_slots.count(i)) continue;
+                    const auto & resident = s.decode_global_slots[i];
+                    const double resident_heat = heat_at(s, (uint32_t) resident.layer,
+                            (uint32_t) resident.expert, heat_now);
+                    if (resident_heat < victim_heat ||
+                            (resident_heat == victim_heat && resident.touch < victim_touch)) {
+                        global_local = (int32_t) i;
+                        victim_heat = resident_heat;
+                        victim_touch = resident.touch;
+                    }
+                }
+                if (global_local >= 0 && candidate_heat <= victim_heat) {
+                    global_local = -1;
+                }
+            }
+            if (global_local >= 0) {
+                auto & target = s.decode_global_slots[(size_t) global_local];
+                if (target.expert >= 0) {
+                    s.decode_global_map.erase(global_expert_key((uint32_t) target.layer, (uint32_t) target.expert));
+                }
+                target.layer = logical;
+                target.expert = e;
+                target.touch = ++s.global_touch_clock;
+                s.decode_global_map[global_expert_key((uint32_t) logical, (uint32_t) e)] = (uint32_t) global_local;
+                reserved_global_slots.insert((uint32_t) global_local);
+                slot = (int32_t) (scratch_begin + (uint32_t) global_local);
+                global_slot = true;
+                ++dbg_global_alloc;
+            }
+        }
         if (slot < 0 && next_scratch_slot < scratch_end) {
             slot = (int32_t) next_scratch_slot++;
+            host_admit = true;
             ++dbg_scratch_alloc;
         }
         if (slot < 0) {
@@ -1569,6 +1747,9 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
         const int32_t local_slot = slot;
         const int32_t write_slot = persistent_slot ?
             (int32_t) persistent_global_slot(s, (uint32_t) logical, (uint32_t) local_slot) : slot;
+        if (persistent_slot || global_slot) {
+            stable_gpu_admissions.emplace_back((uint32_t) logical, (uint32_t) e);
+        }
 
         // Queue one blob load per expert kind. Submission happens below in a
         // chunked submit/drain loop, so larger ubatches do not require enough
@@ -1603,6 +1784,8 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
                 (size_t) rec.size,
                 mf.data_offset + rec.rel_offset,
                 (char *) slot_tensor->data + write_off,
+                host_admit,
+                candidate_heat,
             });
         }
 
@@ -1629,16 +1812,17 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
     }
 
     uint64_t routes_persistent = 0;
+    const uint32_t stable_slot_end = scratch_begin + (decode_phase ? s.n_decode_global_slots : 0);
     for (const routed_expert & route : ranked) {
         const auto it = call_exp2slot.find(route.id);
         GGML_ASSERT(it != call_exp2slot.end());
-        if ((uint32_t) it->second < scratch_begin) {
+        if ((uint32_t) it->second < stable_slot_end) {
             routes_persistent += route.count;
         }
     }
 
     GGML_ASSERT(dbg_hits + misses_loaded == (int) uniq.size());
-    GGML_ASSERT(dbg_free_alloc + dbg_evictions + dbg_scratch_alloc == misses_loaded);
+    GGML_ASSERT(dbg_free_alloc + dbg_evictions + dbg_global_alloc + dbg_scratch_alloc == misses_loaded);
     GGML_ASSERT(routes_hit <= routes_persistent && routes_persistent <= routes_required);
 
     if (debug_admission() && row_token_idx == 0 && n_tokens > 1) {
@@ -1685,15 +1869,16 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
         const int n = (int) completions.size();
         for (auto & c : completions) {
             bool release_pinned_now = true;
-            if (!c.ok) {
+                if (!c.ok) {
                 LLAMA_LOG_ERROR("moe_eval_callback: I/O failed loading L%d e%d k%d slot=%d "
                         "offset=%llu bytes=%zu got=%zu errno=%d\n",
                         c.layer, c.expert, c.kind, c.slot,
                         (unsigned long long) c.file_offset,
                         c.blob_size, c.bytes_read, c.io_error);
-                if (c.owns_pinned_buf && c.pinned_buf) {
-                    io_release_buffer(c.pinned_buf);
-                }
+                    if (c.owns_pinned_buf && c.pinned_buf) {
+                        io_release_buffer(c.pinned_buf);
+                    }
+                    host_cache_release(c.host_cache_lease);
                 miss_lookup.erase(c.request_id);
                 ++completed_misses;
                 GGML_ABORT("MoE-offload: expert blob I/O failed");
@@ -1724,6 +1909,7 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
                     s.inflight_h2d.push_back(slot_pool_state::inflight_h2d_buffer{
                         c.pinned_buf,
                         c.owns_pinned_buf,
+                        c.host_cache_lease,
                         c.h2d_begin_event,
                         c.h2d_event,
                         c.layer,
@@ -1738,6 +1924,7 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
                     const auto h2d_wait_end = std::chrono::steady_clock::now();
                     stall_us += std::chrono::duration_cast<std::chrono::microseconds>(
                             h2d_wait_end - h2d_wait_start).count();
+                    host_cache_release(c.host_cache_lease);
                 }
             } else {
                 // Fallback: CUDA unavailable or io_h2d_async failed. Look up
@@ -1754,6 +1941,7 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
                     layer_load_stats.h2d_us += std::chrono::duration_cast<std::chrono::microseconds>(
                             h2d_end - h2d_start).count();
                 }
+                host_cache_release(c.host_cache_lease);
             }
 
             if (debug_slot_fingerprint() && c.kind == EXPERT_GATE && c.blob_size > 0) {
@@ -1776,7 +1964,6 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
 
     if (!miss_blobs.empty()) {
         static const bool diag_no_async = std::getenv("LLAMA_MOE_DEBUG_NO_ASYNC") != nullptr;
-        const bool direct_pinned_cache = host_cache_is_pinned();
         size_t next_miss = 0;
 
         while (next_miss < miss_blobs.size() || completed_misses < submitted_misses) {
@@ -1784,8 +1971,8 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
             bool waiting_for_staging = false;
 
             while (next_miss < miss_blobs.size()) {
-                void * pinned = direct_pinned_cache ? nullptr : io_try_acquire_buffer();
-                if (!direct_pinned_cache && !pinned) {
+                void * pinned = io_try_acquire_buffer();
+                if (!pinned) {
                     waiting_for_staging = true;
                     if (release_completed_h2d_buffers(s) > 0) {
                         made_progress = true;
@@ -1803,6 +1990,9 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
                 req.slot        = blob.slot;
                 req.pinned_buf  = pinned;
                 req.owns_pinned_buf = pinned != nullptr;
+                req.host_cache_admit = blob.host_admit;
+                req.host_cache_heat = blob.heat;
+                req.host_cache_lease = 0;
                 req.blob_size   = blob.blob_size;
                 req.file_offset = blob.file_offset;
                 req.gpu_dst     = blob.gpu_dst;
@@ -1857,6 +2047,13 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
                 }
             }
         }
+    }
+
+    // Host and stable GPU tiers are exclusive. Mark newly admitted persistent
+    // or global-decode experts after their H2D requests have acquired leases;
+    // the Host entry is reclaimed only after the CUDA event releases them.
+    for (const auto & admission : stable_gpu_admissions) {
+        host_cache_mark_gpu_resident(admission.first, admission.second);
     }
 
     int64_t slot_ids_h2d_us = 0;
@@ -2009,6 +2206,10 @@ bool moe_eval_callback(struct ggml_tensor * t, bool ask, void * user_data) {
         p.row.k_scratch = (uint64_t) dbg_scratch_alloc;
         p.row.route_rank_us = route_rank_us;
         p.row.route_hash = route_hash;
+        p.row.global_gpu_hits = global_unique_hits;
+        p.row.global_gpu_misses = global_unique_misses;
+        p.row.global_gpu_admits = (uint64_t) dbg_global_alloc;
+        p.row.routes_global_hit = routes_global_hit;
         p.h2d_events = std::move(h2d_events_for_row);
 
         // Phase I: record compute_begin on the compute stream right after
@@ -2107,7 +2308,6 @@ void slot_pool_init_io(const std::string & source_path) {
     int n_buffers = (int)(2 * active_slots_per_layer());
     if (n_buffers < kMinIoBuffers) n_buffers = kMinIoBuffers;
     if (n_buffers > kMaxIoBuffers) n_buffers = kMaxIoBuffers;
-    if (host_cache_is_pinned()) n_buffers = 0;
     size_t blob_max = mf.expert_blob_size_max > 0 ? mf.expert_blob_size_max : (1024*1024);
 
     LLAMA_LOG_INFO("%s: initializing async I/O worker (n_buffers=%d, blob_max=%zu)\n",
@@ -2263,6 +2463,33 @@ bool slot_pool_flush_predictor() {
         }
     }
     return ok;
+}
+
+bool slot_pool_write_heat(const std::string & path) {
+    auto & s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.configured || path.empty()) return false;
+    std::ofstream out(path, std::ios::out | std::ios::trunc);
+    if (!out) return false;
+    out << "# moe-tier-heat-v1\n";
+    out << "# half_life=" << get_options().tier_half_life << "\n";
+    out << "# columns: layer expert heat rank\n";
+    out << std::setprecision(17);
+    for (uint32_t layer = 0; layer < s.heat.size(); ++layer) {
+        std::vector<std::pair<double, uint32_t>> ranked;
+        ranked.reserve(s.heat[layer].size());
+        for (uint32_t expert = 0; expert < s.heat[layer].size(); ++expert) {
+            ranked.emplace_back(heat_at(s, layer, expert, s.token_idx), expert);
+        }
+        std::sort(ranked.begin(), ranked.end(), [](const auto & a, const auto & b) {
+            if (a.first != b.first) return a.first > b.first;
+            return a.second < b.second;
+        });
+        for (size_t rank = 0; rank < ranked.size(); ++rank) {
+            out << layer << ' ' << ranked[rank].second << ' ' << ranked[rank].first << ' ' << rank << '\n';
+        }
+    }
+    return out.good();
 }
 
 } // namespace llama_moe

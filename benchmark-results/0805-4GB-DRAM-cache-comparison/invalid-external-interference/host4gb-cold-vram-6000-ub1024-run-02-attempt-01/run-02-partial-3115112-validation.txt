@@ -1,0 +1,10 @@
+validation=fail
+token_sha256=0e0a1d8d55405650e348b8f7010f65f4b0fa881961fc737c5062b54c3b7d4ecf
+route_trace_sha256=4db61e9ce86f98642ab765e92ac21628115606f9241f9fb9e294d4607f2919d4
+profile_layer_rows=41000
+vram_misses=81756
+h2d_bytes=156270493696
+host_memcpy_bytes=0
+ssd_bytes=77706575872
+ssd_reads=121956
+error=GPU memory baseline delta is invalid: 8301 MiB

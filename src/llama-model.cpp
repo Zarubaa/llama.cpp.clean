@@ -2346,7 +2346,11 @@ llama_model_params llama_model_default_params() {
         /*.moe_profile_summary         =*/ nullptr,
         /*.moe_host_cache              =*/ "off",
         /*.moe_host_cache_preload      =*/ "none",
+        /*.moe_host_cache_hotset       =*/ nullptr,
+        /*.moe_tier_policy             =*/ "legacy",
         /*.moe_cache_vram_mb           =*/ 0,
+        /*.moe_host_cache_capacity_mb  =*/ 0,
+        /*.moe_tier_half_life          =*/ 128,
         /*.moe_cache_vram_frac         =*/ 0.0f,
     #endif
         /*.vocab_only                  =*/ false,
@@ -2360,6 +2364,7 @@ llama_model_params llama_model_default_params() {
     #ifdef LLAMA_MOE_OFFLOAD
         /*.moe_offload                 =*/ false,
         /*.moe_oracle                  =*/ false,
+        /*.moe_decode_global_cache     =*/ false,
     #endif
     };
 

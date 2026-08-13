@@ -1,0 +1,9 @@
+prompt_id	file	topic	language_mix	intended_use	bytes	sha256	qwen35_token_count
+01	prompt-01-storage-incident.txt	NVMe and page-cache incident investigation	zh-en	cold path, source reads, cache locality	5538	c7bb0cd647f7d6af30f97558f0fbc430637571a9ceeb4e11ba50ef6d61704143	1222
+02	prompt-02-cuda-kernel-review.txt	CUDA kernel optimization review	zh-en	GPU compute versus transfer overlap	5527	94e84cfb41fd8471c62e3fc2a06337ecd3ce1bde6fc3c42da8cbf5a9f115906c	1173
+03	prompt-03-serving-capacity-plan.txt	LLM serving capacity and admission plan	zh-en	batching, tail latency, memory pressure	5188	374c2a8fe72e2f8adc1728f0bb0537378171f705b63b665b3cbbbf15e38ab7d6	1154
+04	prompt-04-database-migration.txt	Online database migration postmortem	zh-en	working-set change and bursty access	5421	b3101ae012279d83bff361e8f573b89b6a672b716368245e240cb532190ed0ac	1102
+05	prompt-05-sensor-pipeline.txt	Industrial sensor data pipeline	zh-en	large context, numeric and categorical vocabulary	5318	98d52d272151b519c3c600725aea76a49cf7c37394fe116302c98e241b52f021	1083
+06	prompt-06-network-control-room.txt	Network control-room event report	zh-en	timeline reasoning and heterogeneous terms	5104	f34e131ebb380cd36403dc1175074039691abc1d08a27698a2bd41d40042babd	1094
+07	prompt-07-compiler-build-system.txt	Compiler and build-system redesign	zh-en	dependency graph and repeated symbol names	5518	8eed5d3721d6772052cf4e28211d7931a6a3e661a9997d6b76500615434b6c1c	1108
+08	prompt-08-clinical-trial-ops.txt	Clinical trial operations review	zh-en	long-form evidence, dates, risks, decisions	5512	be75d432c4bc616cde82e565cffcfc954975577a15c3c383b9123cb5a3a48311	1095

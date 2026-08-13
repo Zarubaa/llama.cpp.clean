@@ -1,0 +1,2 @@
+mode	vram_cache_mb	ubatch	prompt_id	repeat_count	prefill_ms	prefill_tok_s	decode_ms	decode_tok_s	tpot_ms
+control-original	6000	512	01	2	5470.450000000001	187.18974829275083	67808.55	15.102388792143024	66.22

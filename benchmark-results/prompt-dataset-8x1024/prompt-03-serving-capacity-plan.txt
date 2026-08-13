@@ -1,0 +1,18 @@
+一家内部问答服务准备把 35B 级别的稀疏模型部署到单张 L20。产品团队给出的目标是平均 decode 不低于 25 token/s，p95 TPOT 不超过 55 ms，首 token 延迟不超过 8 秒。流量不是恒定的：工作日早上会出现短时间的文档摘要请求，晚上则是连续的代码审查请求。每个请求的 prompt 长度通常在 700 到 1400 token 之间，输出长度大约 512 到 1024 token。模型权重不能完整放入显存，专家文件位于本地 NVMe，普通层权重在启动时常驻 GPU。
+
+容量评估首先要明确排队模型。服务端把请求放入 admission queue，只有当 GPU compute slots、host staging buffers 和 host expert cache 都有足够预算时才允许进入执行阶段。一个请求可能持有 12 个专家 lease，prefill 完成后释放其中大部分，decode 每次只保留当前 layer 的 lease。若把整个请求期间的最大专家数当成固定资源，会严重低估并发度；若完全依赖即时回收，又可能让两个相邻 layer 同时争抢同一个 shared slot。
+
+实验室记录显示，6000 MiB 的 GPU expert cache 在短 prompt 上命中率约为 15% 到 20%，decode 阶段则可以达到 75% 以上。增加到 8000 MiB 后，命中率上升，但收益不是线性的，因为不同请求的热门专家集合存在重叠。一个 4 GiB 的 host cache 如果保存与 GPU 互补的专家，可以把一部分源读取替换成 host-to-host copy 或 pinned H2D。这里需要区分三个时间：专家从文件进入 host cache 的 fill time，host cache 到 staging 的 memcpy time，以及 staging 到 GPU 的 DMA time。
+
+容量计划中最危险的错误是用平均带宽推算峰值并发。例如模型文件可能在顺序读基准中达到 7 GiB/s，但 decode 访问的是许多分散的小 blob，单次读取的系统调用和 page fault 成本会主导尾延迟。page cache 处于热态时，read_bytes 可能接近零，但应用仍然会执行 fread；因此“逻辑读取字节数”和“物理 SSD 读取字节数”必须分开。若节点上还有日志服务和数据处理服务，page cache 的回收会让容量评估更加悲观。
+
+我们考虑三种 admission policy。保守策略在 host cache 低于 80% ready 时限制并发，只接受已经命中 GPU 或 host 的请求；激进策略允许 cold expert 直接从文件读取，并通过 per-layer queue 隐藏一部分延迟；混合策略把长 prompt 请求分配到一个独立队列，避免其 prefill 把短请求的 decode 供数打断。每种策略都要测 throughput、p50/p95/p99 TPOT、队列等待、GPU utilization、DRAM bandwidth、SSD IOPS 和 cache eviction rate。
+
+容量报告还需要解释预热。服务冷启动时如果一次性加载全部 4 GiB hotset，启动时间会增加几秒，但第一个请求的 inference TTFT 可能改善。在线系统可以在后台按历史访问频率逐步填充，而不是把 preload 时间算入每个请求。为了防止错误的热度反馈，统计窗口应区分 prefill 访问和 decode 访问，并对同一专家在连续 token 中的重复访问设置衰减。没有预测器时，可以采用分层 LRU：最近访问的专家进入 probation 队列，第二次访问后才进入 protected 队列。
+
+最终上线门槛包括：任何模式下都不能出现错误输出；GPU 与 host cache 的 token route 必须一致；host cache 满时必须有明确的淘汰计数；eviction 不能释放仍被 CUDA event 引用的内存；锁页失败必须报告并停止 pinned 模式。性能结论不能只看平均值，至少要用八条不同主题的自然 prompt，按照固定 prompt id 进行配对。若某一条 prompt 让 TPOT 显著偏离其他 prompt，应报告它的路由和 source tier 分布，而不是把它当成异常值删除。
+容量团队还要把 prompt 影响显式建模。不同主题会诱发不同的 router locality，短期重复 token 可能提高 GPU hit，而跨主题请求会让 host tier 更快变化。因此总表不能把 prompt 当作隐藏变量；每一行至少要包含 prompt_id、prompt_sha256、n_prompt、n_gen 和 route_trace_sha256。比较三级缓存时，优先计算同一 prompt 下的 paired delta，再对八条 prompt 的 delta 做均值和 bootstrap 区间。
+
+服务端的失败处理也属于容量边界。磁盘读取超时不能无限延长请求 lease，host cache admission 失败不能静默退化成全量 pinned；否则一个异常请求会占满 staging pool。建议给每个 source tier 设置 deadline，并在超时后返回可观测的 overload reason。调度器还要记录 admission wait、cache wait、H2D wait 和 GPU compute 四类等待，只有这样才能知道扩大哪一级容量真正有效。
+
+部署前的 shadow test 使用生产流量的脱敏路由统计，但不复用用户文本。shadow worker 只计算 route 和 cache decision，不向用户返回结果。它可以估计八条自然 prompt 是否覆盖了常见专家集合，也可以发现某一条 prompt 产生极端稀疏或极端集中的路由。最终上线决策要同时看平均吞吐、p95/p99、错误率、内存峰值和恢复时间。

@@ -50,6 +50,12 @@ struct bench_params {
     std::string moe_profile_summary;
     std::string moe_host_cache = "off";
     std::string moe_host_cache_preload = "none";
+    std::string moe_host_cache_hotset;
+    int moe_host_cache_capacity_mb = 0;
+    std::string moe_tier_policy = "legacy";
+    int moe_tier_half_life = 128;
+    bool moe_decode_global_cache = false;
+    std::string moe_heat_output;
     std::string page_cache_policy = "natural";
     std::string token_trace;
     std::string logits_bin;
@@ -97,6 +103,17 @@ static bool parse_args(int argc, char ** argv, bench_params & p) {
         else if (value_for("--moe-profile-summary", p.moe_profile_summary)) {}
         else if (value_for("--moe-host-cache", p.moe_host_cache)) {}
         else if (value_for("--moe-host-cache-preload", p.moe_host_cache_preload)) {}
+        else if (value_for("--moe-host-cache-hotset", p.moe_host_cache_hotset)) {}
+        else if (int_for("--moe-host-cache-capacity-mb", p.moe_host_cache_capacity_mb)) {}
+        else if (value_for("--moe-tier-policy", p.moe_tier_policy)) {}
+        else if (int_for("--moe-tier-half-life", p.moe_tier_half_life)) {}
+        else if (value_for("--moe-heat-output", p.moe_heat_output)) {}
+        else if (arg == "--moe-decode-global-cache") {
+            if (i + 1 >= argc) return false;
+            const std::string value = argv[++i];
+            if (value != "on" && value != "off") return false;
+            p.moe_decode_global_cache = value == "on";
+        }
         else if (value_for("--page-cache-policy", p.page_cache_policy)) {}
         else if (value_for("--token-trace", p.token_trace)) {}
         else if (value_for("--logits-bin", p.logits_bin)) {}
@@ -480,13 +497,19 @@ static std::string format_page_cache_metrics(const page_cache_runtime_metrics & 
 int main(int argc, char ** argv) {
     bench_params p;
     if (!parse_args(argc, argv, p)) {
-        fprintf(stderr, "Usage: llama-moe-bench --model <path> [--prompt-file PATH | -p TEXT] --pp N --tg N [--repeat N] [--moe-cache-vram-mb MB] [--moe-predictor lru|eamc] [--moe-eamc-path PATH] [--moe-profile-csv PATH] [--moe-profile-summary PATH] [--moe-host-cache off|pageable|pinned] [--moe-host-cache-preload none|all] [--page-cache-policy natural|cold|hot] [--token-trace PATH] [--logits-bin PATH] [--moe-reset-cache-between-repeats] [--moe-warm-cache] [--moe-hot-start] [-ub N]\n");
+        fprintf(stderr, "Usage: llama-moe-bench --model <path> [--prompt-file PATH | -p TEXT] --pp N --tg N [--repeat N] [--moe-cache-vram-mb MB] [--moe-predictor lru|eamc] [--moe-profile-csv PATH] [--moe-profile-summary PATH] [--moe-host-cache off|pageable|pinned] [--moe-host-cache-preload none|all|hotset] [--moe-host-cache-capacity-mb MB] [--moe-host-cache-hotset PATH] [--moe-tier-policy legacy|aged-lfu] [--moe-tier-half-life N] [--moe-decode-global-cache on|off] [--moe-heat-output PATH] [--page-cache-policy natural|cold|hot] [--token-trace PATH] [--logits-bin PATH] [-ub N]\n");
         return 1;
     }
     if ((p.moe_host_cache != "off" && p.moe_host_cache != "pageable" && p.moe_host_cache != "pinned") ||
-            (p.moe_host_cache_preload != "none" && p.moe_host_cache_preload != "all") ||
+            (p.moe_host_cache_preload != "none" && p.moe_host_cache_preload != "all" && p.moe_host_cache_preload != "hotset") ||
             (p.moe_host_cache == "off" && p.moe_host_cache_preload != "none")) {
         fprintf(stderr, "invalid host cache configuration\n");
+        return 1;
+    }
+    if (p.moe_host_cache_capacity_mb < 0 || p.moe_tier_half_life < 1 ||
+            (p.moe_tier_policy != "legacy" && p.moe_tier_policy != "aged-lfu") ||
+            (p.moe_host_cache_preload == "hotset" && p.moe_host_cache_hotset.empty())) {
+        fprintf(stderr, "invalid bounded Host cache/tier configuration\n");
         return 1;
     }
     page_cache_policy cache_policy;
@@ -564,6 +587,11 @@ int main(int argc, char ** argv) {
     model_params.moe_profile_summary = nullptr;
     model_params.moe_host_cache = p.moe_host_cache.c_str();
     model_params.moe_host_cache_preload = p.moe_host_cache_preload.c_str();
+    model_params.moe_host_cache_hotset = p.moe_host_cache_hotset.empty() ? nullptr : p.moe_host_cache_hotset.c_str();
+    model_params.moe_host_cache_capacity_mb = (uint64_t) p.moe_host_cache_capacity_mb;
+    model_params.moe_tier_policy = p.moe_tier_policy.c_str();
+    model_params.moe_tier_half_life = (uint32_t) p.moe_tier_half_life;
+    model_params.moe_decode_global_cache = p.moe_decode_global_cache;
 
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx = p.n_ctx;
@@ -656,6 +684,7 @@ int main(int argc, char ** argv) {
     std::vector<double> total_ms;
     uint64_t host_ready_bytes_after_prefill = 0;
     uint64_t host_ready_bytes_after_decode = 0;
+    const llama_moe::host_cache_snapshot host_initial = llama_moe::host_cache_get_snapshot();
     ttft_ms.reserve((size_t) p.n_repeat);
     cold_ttft_ms.reserve((size_t) p.n_repeat);
     warm_ttft_ms.reserve((size_t) p.n_repeat);
@@ -735,15 +764,24 @@ int main(int argc, char ** argv) {
         summary_ctx.host_cache_capacity_bytes = host.capacity_bytes;
         summary_ctx.host_cache_data_bytes = host.data_bytes;
         summary_ctx.host_cache_ready_blobs = host.ready_blobs;
+        summary_ctx.host_cache_ready_experts = host.ready_experts;
+        summary_ctx.host_cache_slots_per_layer = host.slots_per_layer;
         summary_ctx.host_cache_total_blobs = host.total_blobs;
         summary_ctx.host_cache_ready_bytes_after_prefill = host_ready_bytes_after_prefill;
         summary_ctx.host_cache_ready_bytes_after_decode = host_ready_bytes_after_decode;
+        summary_ctx.host_cache_initial_ready_bytes = host_initial.ready_bytes;
+        summary_ctx.host_cache_initial_ready_blobs = host_initial.ready_blobs;
+        summary_ctx.host_cache_initial_ready_experts = host_initial.ready_experts;
         summary_ctx.host_cache_preload_alloc_us = host.preload_alloc_us;
         summary_ctx.host_cache_preload_read_us = host.preload_read_us;
         summary_ctx.host_cache_preload_total_us = host.preload_total_us;
         summary_ctx.host_cache_preload_bytes = host.preload_bytes;
         summary_ctx.host_cache_verified_blobs = host.verified_blobs;
         summary_ctx.host_cache_verification_failures = host.verification_failures;
+        summary_ctx.host_cache_admissions = host.admissions;
+        summary_ctx.host_cache_evictions = host.evictions;
+        summary_ctx.host_cache_bypasses = host.bypasses;
+        summary_ctx.host_cache_active_leases = host.active_leases;
         summary_ctx.service_cold_start_ttft_ms = summary_ctx.ttft_ms + (double) host.preload_total_us / 1000.0;
 
         const llama_moe::profile_snapshot profile = llama_moe::get_profile_snapshot();
@@ -865,6 +903,10 @@ int main(int argc, char ** argv) {
 
     if (!llama_moe::flush_predictor()) {
         fprintf(stderr, "[moe-bench] ERROR: failed to flush MoE predictor state\n");
+        exit_code = 1;
+    }
+    if (!p.moe_heat_output.empty() && !llama_moe::slot_pool_write_heat(p.moe_heat_output)) {
+        fprintf(stderr, "[moe-bench] ERROR: failed to write heat ranking to %s\n", p.moe_heat_output.c_str());
         exit_code = 1;
     }
     if (!llama_moe::host_cache_verify_ready(256)) {

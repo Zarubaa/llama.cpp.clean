@@ -1,0 +1,13 @@
+case_id	mode	vram_cache_mb	ubatch	pp	tg	runs	page_cache_policy	host_cache	host_cache_capacity_mb	host_cache_preload	tier_policy	decode_global_cache
+control-vram-6000-ub512	control	6000	512	1024	1024	3	hot	off	0	none	legacy	off
+control-vram-6000-ub1024	control	6000	1024	1024	1024	3	hot	off	0	none	legacy	off
+control-vram-8000-ub512	control	8000	512	1024	1024	3	hot	off	0	none	legacy	off
+control-vram-8000-ub1024	control	8000	1024	1024	1024	3	hot	off	0	none	legacy	off
+host4gb-cold-vram-6000-ub512	host4gb-cold	6000	512	1024	1024	3	hot	pinned	4096	none	aged-lfu	on
+host4gb-cold-vram-6000-ub1024	host4gb-cold	6000	1024	1024	1024	3	hot	pinned	4096	none	aged-lfu	on
+host4gb-cold-vram-8000-ub512	host4gb-cold	8000	512	1024	1024	3	hot	pinned	4096	none	aged-lfu	on
+host4gb-cold-vram-8000-ub1024	host4gb-cold	8000	1024	1024	1024	3	hot	pinned	4096	none	aged-lfu	on
+host4gb-hot-vram-6000-ub512	host4gb-hot	6000	512	1024	1024	3	hot	pinned	4096	hotset	aged-lfu	on
+host4gb-hot-vram-6000-ub1024	host4gb-hot	6000	1024	1024	1024	3	hot	pinned	4096	hotset	aged-lfu	on
+host4gb-hot-vram-8000-ub512	host4gb-hot	8000	512	1024	1024	3	hot	pinned	4096	hotset	aged-lfu	on
+host4gb-hot-vram-8000-ub1024	host4gb-hot	8000	1024	1024	1024	3	hot	pinned	4096	hotset	aged-lfu	on

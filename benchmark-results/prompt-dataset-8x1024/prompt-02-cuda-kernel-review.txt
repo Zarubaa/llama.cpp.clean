@@ -1,0 +1,18 @@
+这份代码审查针对一个量化 MoE 推理内核。内核在每个 token 上接收 router 输出的 top-k expert id，先从 host staging buffer 将权重复制到 GPU slot，再调用 fused dequantize-and-matmul kernel。开发者报告说，理论带宽利用率已经达到 78%，但是在 ubatch=512 时 decode 仍然比 ubatch=1024 慢很多。审查者不能只看 Nsight Systems 中的平均 kernel duration，而要把 CUDA stream、event dependency、host memory type 和 slot reuse 一起分析。
+
+当前实现有三个 stream。transfer stream 负责 H2D copy，compute stream 负责 expert GEMM，control stream 负责更新 slot metadata。每个专家的 gate、up、down 矩阵分别对应三个 CUDA event。一次请求开始时，control stream 写入 loading 状态；transfer stream 等 staging buffer 的 ready event，然后提交三个 memcpy；compute stream 等最后一个 H2D event 完成后启动 GEMM。代码中有一处看似无害的 cudaStreamSynchronize(control_stream)，它位于提交下一层请求之前。由于 control stream 和 transfer stream 没有显式的跨流 event chain，这个同步会把尚未使用的预取也变成串行操作。
+
+内核使用 Q4_K_M 格式，每个 block 里包含 scale、minimum 和 packed quantized values。dequantize 阶段将 scale 解码到 registers，随后通过 tensor-core friendly layout 进行矩阵乘法。对连续的 gate 和 up 权重，内存访问是合并的；但当两个专家共享一个 scratch region 时，down 权重的起始地址可能跨越 128-byte sector。Nsight Compute 报告 global load efficiency 只有 72%，却没有显示明显的 shared-memory bank conflict。一个可能的解释是 slot allocator 为不同层使用了相同的对齐单位，但没有把三种矩阵的真实 stride 向上取整到 sector 边界。
+
+审查还发现，profile 中的 H2D 时间不能直接与 token latency 相加。对于一个 token，四个 expert copy 可能与上一层的 GEMM 重叠；只有当 router 选择了一个仍处于 LOADING 状态的专家时，compute stream 才会产生 stall。正确的诊断应该记录 copy submitted、copy completed、kernel ready 和 kernel finished 四个时间戳，并区分 queued duration、DMA duration 和 wait duration。若只记录 cudaMemcpyAsync 返回前后的 CPU 时间，会把排队时间和实际 PCIe 传输混在一起。
+
+优化建议分为低风险和高风险两类。低风险改动包括删除不必要的全局 synchronize，为每个 blob 建立明确的 event dependency，把 host staging buffer 按 NUMA node 分组，并在 slot metadata 中存储 generation counter。另一个低风险改动是把 router 输出按 layer 和 source tier 排序，使同一个 staging buffer 中的 H2D copy 更容易合并。高风险改动是把三个矩阵融合成一个物理 blob，或让 kernel 直接读取 unified virtual address。后者可能减少地址更新，却会让 page fault 和迁移延迟进入关键路径。
+
+测试计划必须包含四个对照。第一组是 pageable host 加 pinned staging，第二组是 pinned host 直接 H2D，第三组保持同样的 cache 命中率但把 transfer stream 的并发度减半，第四组把 slot 对齐从 256 bytes 改成 4096 bytes。每组使用相同的 router trace 和相同的 prompt，重复运行时只更换进程，不在同一个进程中连续切换配置。报告应同时展示 prefill tok/s、decode tok/s、TPOT、H2D ms/token、compute ms/token、stall ms/token、PCIe throughput 和 kernel occupancy。
+
+审查结论不能简单写成“用了 pinned memory 就会更快”。如果 GPU compute 只占 7 ms/token，而 H2D 和等待占 30 ms/token，说明主要问题是供数调度而不是矩阵乘法本身。反过来，如果调整 event chain 后 H2D 空洞消失但 SM occupancy 仍低，则应继续检查 dequantize 指令、register pressure 和 launch configuration。最终提交需要带有一个失败案例：当 staging pool 只有两个 buffer 时，必须证明系统会阻塞而不是复用仍被 compute stream 引用的地址。
+审查者还要求对不同矩阵尺寸做分桶统计。小矩阵的 DMA 启动开销可能比传输字节数更重要，大矩阵则更容易达到 PCIe 链路的稳定带宽；不能用一个平均 GiB/s 覆盖两种情况。对每个 bucket 应记录 source blob size、copy alignment、stream id、event wait duration 和 kernel tile shape。若使用 CUDA graph，必须分别测量 graph capture、graph replay 和 graph invalidation，不能把第一次 capture 的代价混入 steady-state decode。
+
+另一个风险是错误地把 pinned allocation 当成缓存命中。Pinned memory 只改变 host 页面是否可以被 DMA 直接访问，不会自动保存专家，也不会减少专家查找或文件读取。内核修复必须先证明 source read bytes 降低、host cache hit 提高，随后再讨论 direct H2D 的收益。对于 NUMA remote 的 pinned 页面，还要单独做对照，因为 DMA 可以直接发起并不代表 CPU 填充 staging 的带宽相同。
+
+最终 review checklist 包括：所有跨 stream 依赖是否使用 event 而非隐式同步；slot generation 是否在 GPU 完成后才递增；eviction 是否避开 active lease；copy 和 compute 是否使用同一 CUDA context；错误路径是否释放半完成的 DMA；以及 profile 中的时间是否来自 CUDA event 而不是 wall-clock 近似。每项都需要一个最小可复现测试和一条可核对的日志字段。

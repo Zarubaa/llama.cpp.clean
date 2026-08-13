@@ -1,0 +1,19 @@
+网络控制室在一次区域链路抖动中收到了来自三个系统的相互矛盾的告警。边界路由器报告 BGP session reset，流量采集器报告丢包率 4.7%，而应用监控只看到少量超时。事件涉及两条跨城专线、一个云上 NAT 网关和一组运行在 Kubernetes 上的 API pod。值班团队需要在不扩大故障范围的前提下判断，问题是运营商链路、路由策略、连接跟踪表，还是应用自身的重试风暴。
+
+时间线从 22:04:11 开始。第一条链路的光模块收发功率在正常范围内，但接口 error counter 每秒增加；22:04:18，边界路由器撤销了一个 /24 前缀；22:04:21，另一条链路开始承载原本属于第一条链路的流量；22:04:29，NAT gateway 的 conntrack entries 达到容量的 91%；22:04:36，API p99 latency 超过 2 秒。重试策略把每个失败请求最多重新发送三次，造成入口流量只增加 18%，但后端连接数增加了 2.4 倍。
+
+控制室保留了 packet capture、路由器 syslog、Prometheus counter、云厂商 flow log 和应用 trace。不同来源的时间戳精度不同：packet capture 使用硬件纳秒时间，syslog 只有毫秒，应用 trace 由节点时钟生成。校时服务在事件前两分钟出现过一次 offset spike，因此不能直接按字符串时间排序。分析者需要先选一个可信的时间基准，再把每条证据标记为 observed、derived 或 inferred。
+
+初步缓解措施有四个。第一，降低重试上限并增加指数退避；第二，临时撤回一个可能引起流量倾斜的 community attribute；第三，为 NAT gateway 增加 conntrack quota；第四，把一部分读请求切到备用区域。每项措施都有副作用：撤回路由可能让拥塞转移到另一条链路，增加 quota 会消耗节点内存，切换区域会增加 RTT，而重试退避可能让用户感到请求失败更慢。变更必须按 canary、5%、25%、100% 的阶段推进，并在每一阶段检查丢包、TCP retransmission、连接建立时间和业务成功率。
+
+为了复现问题，网络团队搭建了一个受控 replay。回放器从真实 trace 中抽取请求大小、五元组分布和时间间隔，但对客户标识做不可逆散列。实验不能只用平均流量，因为故障发生在短时 burst 和路由收敛重叠的窗口。每个 replay 场景要固定输入文件，模式之间使用相同 packet schedule；三次运行应当重新启动进程并记录 CPU affinity、IRQ 分布、网卡队列、socket buffer 和块设备状态。
+
+性能报告需要区分网络路径和模型路径。如果网络数据进入 host DRAM 后被缓存，后续请求可能不再触发文件读取，但 GPU H2D 和 kernel scheduling 仍然存在。类似地，page cache 的 logical read bytes 不能被写成 SSD bandwidth。报告应同时展示请求完成率、p50/p95/p99、CPU cycles per request、DRAM cache hit、source read、H2D wait 和 GPU compute。任何优化都必须先证明没有改变重试语义、路由顺序或返回结果。
+
+事件复盘的最终行动项是建立统一的证据模型：每个告警包含来源、采样周期、时间基准、置信度和关联变更。控制室还需要为 page cache、pinned memory 和 network buffer 分别设置预算，避免一个子系统在突发事件中无限吸收资源。只有当回放在多个独立场景中复现相同的瓶颈，团队才应把修复合入生产，而不是根据一次漂亮的平均延迟做决定。
+回放场景还要覆盖 MTU 变化、IPv6 fallback、DNS cache miss 和连接复用失败。每种情况会改变请求的包数量和 socket 生命周期，即使应用 payload 相同，也可能产生不同的 CPU 与内存压力。分析时需要把 network buffer、page cache、host expert cache 和 GPU staging 分开计数；否则一个 DNS 解析抖动可能被错误解释为模型 H2D stall。
+
+变更控制要求保留每个 canary 阶段的配置快照和 rollback command。回放完成后，工程师要验证路由器 FIB、NAT conntrack、Kubernetes endpoint、应用重试计数和模型 route digest 都回到基线。任何一个组件没有恢复，都不能开始下一组模式测试，因为残留连接或残留 page cache 会污染下一次结果。
+
+最终评估采用按事件场景聚类的统计方法。每个场景内的三次进程运行只能估计该场景的噪声，场景之间的差异必须作为真实 workload variation 报告。报告应展示 paired improvement、场景间 IQR 和 bootstrap 置信区间，并列出最容易失败的时间窗口，而不是只给一个全局平均 token/s。
+控制室还要检查中间设备的缓存行为。交换机 ARP/ND 表、路由器 FIB、NAT conntrack 和应用 DNS cache 的生命周期不同，清理其中一个并不会清理其他状态。回放脚本要在 metadata 中记录这些表的初始大小和结束大小，并把配置变更与 packet schedule 对齐。只有状态完全可复现，三次运行之间的差异才适合归因于 host cache 或 GPU 传输路径。

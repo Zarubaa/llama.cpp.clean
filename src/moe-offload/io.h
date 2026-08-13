@@ -42,6 +42,9 @@ struct io_request {
     void *   pinned_buf;   // pinned host buffer (owned by pool)
     bool     owns_pinned_buf;
     const void * host_src;
+    bool     host_cache_admit;
+    double   host_cache_heat;
+    uint64_t host_cache_lease;
     size_t   blob_size;    // bytes to read
     uint64_t file_offset;  // absolute byte offset in .moe.gguf
     char *   gpu_dst;      // GPU destination address (slot_tensor->data + slot * nb[2])
@@ -55,6 +58,8 @@ struct io_request {
     int64_t  ssd_read_us;  // worker-measured fread duration in microseconds
     bool     host_cache_hit;
     bool     host_cache_miss;
+    bool     host_cache_admitted;
+    bool     host_cache_bypassed;
     int64_t  host_cache_lookup_us;
     int64_t  host_cache_fill_us;
     int64_t  host_memcpy_us;

@@ -177,6 +177,10 @@ void profiler::record(const profile_row & row) {
     stats.k_victim_admit += row.k_victim_admit;
     stats.k_scratch += row.k_scratch;
     stats.route_rank_us += row.route_rank_us;
+    stats.global_gpu_hits += row.global_gpu_hits;
+    stats.global_gpu_misses += row.global_gpu_misses;
+    stats.global_gpu_admits += row.global_gpu_admits;
+    stats.routes_global_hit += row.routes_global_hit;
     if (row.cache_resident_experts > stats.cache_resident_peak) {
         stats.cache_resident_peak = row.cache_resident_experts;
     }
@@ -235,7 +239,11 @@ void profiler::record(const profile_row & row) {
             << row.pinned_staging_wait_us << ','
             << row.ssd_bytes << ','
             << row.ssd_reads << ','
-            << row.route_hash << '\n';
+            << row.route_hash << ','
+            << row.global_gpu_hits << ','
+            << row.global_gpu_misses << ','
+            << row.global_gpu_admits << ','
+            << row.routes_global_hit << '\n';
     }
 }
 
@@ -284,6 +292,10 @@ void profiler::record_request(const profile_request_row & row) {
             << row.predictor_save_us << ','
             << row.profile_flush_us << ','
             << row.sidecar_write_bytes << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
+            << 0 << ','
             << 0 << ','
             << 0 << ','
             << 0 << ','
@@ -362,6 +374,9 @@ std::string profiler::summary() const {
     out << "k_victim_admit: " << stats.k_victim_admit << '\n';
     out << "k_scratch: " << stats.k_scratch << '\n';
     out << "route_rank_us: " << stats.route_rank_us << '\n';
+    out << "global_gpu_hits: " << stats.global_gpu_hits << '\n';
+    out << "global_gpu_misses: " << stats.global_gpu_misses << '\n';
+    out << "global_gpu_admits: " << stats.global_gpu_admits << '\n';
     out << "request_wall_us: " << stats.request_wall_us << '\n';
     out << "request_end_us: " << stats.request_end_us << '\n';
     out << "predictor_end_us: " << stats.predictor_end_us << '\n';
@@ -438,6 +453,12 @@ std::string format_summary(
     out << std::fixed << std::setprecision(1);
     out << "cache hit rate (prefill): " << hit_rate_percent(profile.prefill) << "%\n";
     out << "cache hit rate (decode): " << hit_rate_percent(profile.decode) << "%\n";
+    const uint64_t global_gpu_lookups = profile.decode.global_gpu_hits + profile.decode.global_gpu_misses;
+    out << "global GPU decode cache: hits=" << profile.decode.global_gpu_hits
+        << " misses=" << profile.decode.global_gpu_misses
+        << " admits=" << profile.decode.global_gpu_admits
+        << " hit_rate=" << (global_gpu_lookups == 0 ? 0.0 :
+                100.0 * (double) profile.decode.global_gpu_hits / (double) global_gpu_lookups) << "%\n";
     out << "route hit coverage (prefill): "
         << route_coverage_percent(profile.prefill.routes_hit, profile.prefill.routes_required) << "%\n";
     out << "route persistent coverage (prefill): "
@@ -500,8 +521,13 @@ std::string format_summary(
         << " capacity=" << bytes_to_gib(ctx.host_cache_capacity_bytes) << " GB"
         << " data=" << bytes_to_gib(ctx.host_cache_data_bytes) << " GB\n";
     out << "Host cache ready: blobs=" << ctx.host_cache_ready_blobs << "/" << ctx.host_cache_total_blobs
+        << " experts=" << ctx.host_cache_ready_experts
+        << " slots_per_layer=" << ctx.host_cache_slots_per_layer
         << " after_prefill=" << bytes_to_gib(ctx.host_cache_ready_bytes_after_prefill) << " GB"
         << " after_decode=" << bytes_to_gib(ctx.host_cache_ready_bytes_after_decode) << " GB\n";
+    out << "Host cache initial: blobs=" << ctx.host_cache_initial_ready_blobs
+        << " experts=" << ctx.host_cache_initial_ready_experts
+        << " bytes=" << bytes_to_gib(ctx.host_cache_initial_ready_bytes) << " GB\n";
     out << "Host cache access: hits=" << host_hits
         << " misses=" << (host_accesses - host_hits)
         << " hit_rate=" << host_hit_pct << "%\n";
@@ -511,6 +537,10 @@ std::string format_summary(
         << " ms bytes=" << bytes_to_gib(ctx.host_cache_preload_bytes) << " GB\n";
     out << "Host cache verification: verified=" << ctx.host_cache_verified_blobs
         << " failures=" << ctx.host_cache_verification_failures << "\n";
+    out << "Host cache management: admissions=" << ctx.host_cache_admissions
+        << " evictions=" << ctx.host_cache_evictions
+        << " bypasses=" << ctx.host_cache_bypasses
+        << " active_leases=" << ctx.host_cache_active_leases << "\n";
     out << "Host cache transfer: memcpy=" << bytes_to_gib(profile.prefill.host_memcpy_bytes + profile.decode.host_memcpy_bytes)
         << " GB h2d=" << bytes_to_gib(profile.prefill.h2d_bytes + profile.decode.h2d_bytes) << " GB\n";
     out << "Source bytes read (total): " << bytes_to_gib(profile.prefill.ssd_bytes + profile.decode.ssd_bytes) << " GB\n";
@@ -561,6 +591,10 @@ profile_phase_stats profiler::total() const {
     stats.k_victim_admit = prefill_stats.k_victim_admit + decode_stats.k_victim_admit;
     stats.k_scratch = prefill_stats.k_scratch + decode_stats.k_scratch;
     stats.route_rank_us = prefill_stats.route_rank_us + decode_stats.route_rank_us;
+    stats.global_gpu_hits = prefill_stats.global_gpu_hits + decode_stats.global_gpu_hits;
+    stats.global_gpu_misses = prefill_stats.global_gpu_misses + decode_stats.global_gpu_misses;
+    stats.global_gpu_admits = prefill_stats.global_gpu_admits + decode_stats.global_gpu_admits;
+    stats.routes_global_hit = prefill_stats.routes_global_hit + decode_stats.routes_global_hit;
     stats.request_wall_us = prefill_stats.request_wall_us + decode_stats.request_wall_us;
     stats.request_end_us = prefill_stats.request_end_us + decode_stats.request_end_us;
     stats.predictor_end_us = prefill_stats.predictor_end_us + decode_stats.predictor_end_us;
@@ -575,7 +609,7 @@ profile_phase_stats profiler::total() const {
 }
 
 void profiler::write_header() {
-    csv << "row_type,request_idx,repeat_idx,batch_idx,token_idx,phase,layer,k_required,k_hit,k_miss,ssd_read_us,h2d_us,compute_us,stall_us,pred_us,pred_observe_us,pred_score_us,callback_wall_us,topk_d2h_us,slot_ids_h2d_us,slot_table_h2d_us,eamc_rows_scored,eamc_cosine_us,eamc_score_materialize_us,eamc_score_cache_hits,eamc_score_cache_misses,cache_resident_experts,predictor,request_wall_us,request_end_us,predictor_end_us,predictor_save_us,profile_flush_us,sidecar_write_bytes,routes_required,routes_hit,routes_persistent,k_empty_admit,k_victim_admit,k_scratch,route_rank_us,host_cache_hits,host_cache_misses,host_cache_hit_bytes,host_cache_miss_bytes,host_cache_lookup_us,host_cache_fill_us,host_memcpy_us,host_memcpy_bytes,h2d_bytes,pinned_staging_wait_us,ssd_bytes,ssd_reads,route_hash\n";
+    csv << "row_type,request_idx,repeat_idx,batch_idx,token_idx,phase,layer,k_required,k_hit,k_miss,ssd_read_us,h2d_us,compute_us,stall_us,pred_us,pred_observe_us,pred_score_us,callback_wall_us,topk_d2h_us,slot_ids_h2d_us,slot_table_h2d_us,eamc_rows_scored,eamc_cosine_us,eamc_score_materialize_us,eamc_score_cache_hits,eamc_score_cache_misses,cache_resident_experts,predictor,request_wall_us,request_end_us,predictor_end_us,predictor_save_us,profile_flush_us,sidecar_write_bytes,routes_required,routes_hit,routes_persistent,k_empty_admit,k_victim_admit,k_scratch,route_rank_us,host_cache_hits,host_cache_misses,host_cache_hit_bytes,host_cache_miss_bytes,host_cache_lookup_us,host_cache_fill_us,host_memcpy_us,host_memcpy_bytes,h2d_bytes,pinned_staging_wait_us,ssd_bytes,ssd_reads,route_hash,global_gpu_hits,global_gpu_misses,global_gpu_admits,routes_global_hit\n";
 }
 
 } // namespace llama_moe

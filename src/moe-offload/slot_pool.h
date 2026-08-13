@@ -133,6 +133,9 @@ void slot_pool_end_request();
 // Persist predictor state at a logical request/session boundary.
 bool slot_pool_flush_predictor();
 
+// Write per-layer aged-frequency rankings collected from observed routes.
+LLAMA_API bool slot_pool_write_heat(const std::string & path);
+
 // Phase D-2: scheduler eval-callback. On post-eval of `ffn_moe_topk-<il>` it
 // reads selected expert IDs, ensures their blobs are resident in slots (loading
 // misses synchronously from disk), and writes the slot_table tensor for that

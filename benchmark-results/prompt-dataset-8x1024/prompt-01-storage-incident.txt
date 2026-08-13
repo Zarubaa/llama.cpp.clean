@@ -1,0 +1,16 @@
+在周二凌晨的存储平台值班中，值班工程师发现推理集群的首 token 延迟突然升高。报警并没有报告 GPU 故障，显存使用量也保持在 41 GiB 左右，但请求日志显示，部分 decode step 的专家权重搬运时间从 18 ms 增加到 47 ms。问题首先出现在一台挂载了本地 NVMe 的 L20 节点，随后相同镜像的另外两台节点也出现了幅度较小的抖动。应用使用 GGUF 文件保存量化后的专家矩阵，每个专家由 gate、up 和 down 三个连续 blob 组成，运行时通过 fseek 和 fread 将缺失 blob 复制到一小组 pinned staging buffer，再调用 cudaMemcpyAsync。
+
+现场调查从三个时间点开始。01:12，节点上的 page cache 命中率约为 99%，服务的平均 decode 速度是 24.1 token/s。01:19，发布了一次日志采集配置，采集器增加了对容器 stdout 的压缩和上传；01:24，page cache 的有效容量开始下降，服务的 p95 TPOT 由 42 ms 上升到 65 ms。01:31，停止日志采集后，块设备读请求仍然持续了十分钟，说明内核回收的文件页没有立即恢复。监控中 NVMe 的平均带宽只有 1.6 GiB/s，远低于设备顺序读基准，但随机小块读的队列深度却从 2 增加到 48。
+
+为了排除错误归因，团队保存了三份证据。第一份是 /proc/self/io 的 read_bytes 采样，它显示模型初始化阶段有真实块设备读，而 prefill 阶段的 rchar 很大但 read_bytes 接近零。第二份是 mincore 对 GGUF 文件的驻留率快照，快照表明模型头部和大部分非专家张量仍在内存，但专家 blob 所在的页分布很稀疏。第三份是 PCIe 传输的 CUDA event 记录，event 之间存在明显空洞；GPU kernel 的执行时间没有同步增加，真正增加的是等待 host buffer 可用的时间。
+
+修复方案有三个候选。方案 A 只提高 pinned staging pool 的数量，把并发读请求从 8 个提升到 32 个；方案 B 在应用层建立 4 GiB 的专家缓存，缓存内容使用普通 pageable DRAM，命中后只做一次 memcpy 到 staging；方案 C 把热点专家直接放入有限容量的 pinned DRAM，并为每个 blob 增加 generation、引用计数和校验和。A 的优点是改动小，但无法减少重复的文件读取；B 不受 mlock 上限影响，却增加一次 host memcpy；C 可以减少一次 memcpy，但容易耗尽锁页额度，还需要处理 NUMA 绑定。
+
+平台负责人要求在下一次变更评审前给出一个可复现实验。实验必须固定模型版本、GPU 时钟策略和 CPU affinity，分别记录模型文件的 page-cache 驻留率、进程 read_bytes、块设备扇区计数、prefill tok/s、decode tok/s、H2D 时间和 GPU compute 时间。每个配置至少使用三个不同的自然 prompt，不能把应用逻辑 fread 直接称为 SSD 物理读取。最终报告要回答：在 page cache 已热的情况下，4 GiB host cache 的收益来自减少了哪一段路径；在 page cache 变冷时，应用 cache 是否仍能隔离 NVMe 抖动；如果 pinned upper bound 只比 pageable cache 快几个百分点，是否值得牺牲锁页额度。
+
+在审查会上，另一位工程师补充了一个容易忽略的边界：同一个专家的三个 blob 不能分别被不同请求驱逐，否则 gate 已经更新而 down 仍指向旧地址。缓存替换必须以专家为原子单位，并且在 GPU kernel 使用期间保持 lease。page cache 的回收也不能通过全局 drop_caches 完成，因为节点上还有其他服务共享文件系统。建议使用逐文件 POSIX_FADV_DONTNEED 作为辅助实验，同时把它标注为文件页驱逐，而不是物理介质冷启动。根据这些约束，评审结论暂时倾向于 B 加小型 C：先在普通 DRAM 保存互补的 hot expert，再把最常访问且最容易造成 stall 的少量专家锁页。
+
+最后，运行手册要求把一次请求拆成 prepare、model initialization、prefill 和 decode 四个阶段。prepare 阶段只能验证文件驻留和设备计数，不能提前访问专家；model initialization 可以加载普通层权重；prefill 要记录每个 layer 的 source tier 和 H2D bytes；decode 还要保存 token window 结束时的 ready blob 数和 host hit rate。任何失败运行都必须保留原始 stderr，而不能只把一个平均数字写进总表。这样才能判断问题来自 SSD、Linux page cache、应用 cache、pinned staging 还是 GPU slot 调度。
+为了使复现实验能够区分不同来源的延迟，运行器还要保存每个专家请求的 source tier、blob size、lookup latency 和 staging wait。冷路径实验不应把所有请求都安排成相同的 layer 顺序，因为真实路由会在不同层访问不同的专家集合。热路径实验则需要在计时前验证 ready bytes 和 ready blobs，不能仅凭 preload 函数返回成功就认为缓存有效。对同一个 prompt 的不同模式，必须比较 token trace 和 route digest；对不同 prompt，则要把 prompt id 作为统计分组。
+
+变更评审最后增加了一个恢复测试：在 decode 进行到第 128 个 token 时暂停一个读线程，观察 GPU 是否能继续使用已经在 host cache 中的专家；随后恢复读线程，检查 LOADING 状态是否能安全转换为 READY。测试结束后要确认所有 file descriptor、CUDA event、lease 和 pinned allocation 都释放。只有在这些资源生命周期得到证明后，性能提升才有资格进入服务容量模型。

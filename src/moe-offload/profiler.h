@@ -56,6 +56,10 @@ struct profile_row {
     uint64_t k_scratch = 0;
     int64_t route_rank_us = 0;
     uint64_t route_hash = 0;
+    uint64_t global_gpu_hits = 0;
+    uint64_t global_gpu_misses = 0;
+    uint64_t global_gpu_admits = 0;
+    uint64_t routes_global_hit = 0;
 };
 
 struct profile_request_row {
@@ -119,6 +123,10 @@ struct profile_phase_stats {
     uint64_t k_victim_admit = 0;
     uint64_t k_scratch = 0;
     int64_t route_rank_us = 0;
+    uint64_t global_gpu_hits = 0;
+    uint64_t global_gpu_misses = 0;
+    uint64_t global_gpu_admits = 0;
+    uint64_t routes_global_hit = 0;
 };
 
 struct profile_snapshot {
@@ -166,15 +174,24 @@ struct profile_summary_context {
     uint64_t host_cache_capacity_bytes = 0;
     uint64_t host_cache_data_bytes = 0;
     uint64_t host_cache_ready_blobs = 0;
+    uint64_t host_cache_ready_experts = 0;
+    uint64_t host_cache_slots_per_layer = 0;
     uint64_t host_cache_total_blobs = 0;
     uint64_t host_cache_ready_bytes_after_prefill = 0;
     uint64_t host_cache_ready_bytes_after_decode = 0;
+    uint64_t host_cache_initial_ready_bytes = 0;
+    uint64_t host_cache_initial_ready_blobs = 0;
+    uint64_t host_cache_initial_ready_experts = 0;
     int64_t host_cache_preload_alloc_us = 0;
     int64_t host_cache_preload_read_us = 0;
     int64_t host_cache_preload_total_us = 0;
     uint64_t host_cache_preload_bytes = 0;
     uint64_t host_cache_verified_blobs = 0;
     uint64_t host_cache_verification_failures = 0;
+    uint64_t host_cache_admissions = 0;
+    uint64_t host_cache_evictions = 0;
+    uint64_t host_cache_bypasses = 0;
+    uint64_t host_cache_active_leases = 0;
     double service_cold_start_ttft_ms = 0.0;
 };
 

@@ -1,0 +1,118 @@
+model: qwen35moe 35B.A3B Q4_K - Medium
+predictor: lru       cache: 6000 MB   ssd: /home/haozhe.lou/models
+n_prompt: 32  n_gen: 16  repeats: 1
+
+ubatch: requested=16 effective=16  slots=60/256/256  mode=streaming
+
+phase     tokens   total_ms   per_token_ms   tok/s
+prefill       32     1275.1         39.85       25
+decode        16      883.6         55.23       18
+
+cache hit rate (prefill): 19.5%
+cache hit rate (decode): 79.3%
+route hit coverage (prefill): 28.9%
+route persistent coverage (prefill): 99.1%
+route hit coverage (decode): 79.3%
+route persistent coverage (decode): 100.0%
+SSD bytes read (decode): 1.89 GB  (avg 120.74 MB/token)
+TTFT: 1275.1 ms
+service cold-start TTFT: 1275.1 ms
+TTFT cold: 1275.1 ms  (n=1)
+TTFT warm: 0.0 ms  (n=0)
+TPOT: 55.23 ms
+total: 2158.7 ms
+
+I/O breakdown (prefill, mean per token):
+  ssd_read          27.00 ms
+  h2d               15.54 ms
+  host_lookup        0.00 ms
+  host_fill          0.00 ms
+  host_memcpy        0.00 ms
+  staging_wait       0.00 ms
+  gpu_compute        4.16 ms
+  stall (overlap loss)     4.27 ms
+  predictor          0.00 ms
+
+Profiler breakdown (prefill, mean per token):
+  predictor_observe     0.00 ms
+  predictor_score       0.00 ms
+  callback_wall        31.64 ms
+  topk_d2h              0.02 ms
+  slot_ids_h2d          0.03 ms
+  slot_table_h2d        0.00 ms
+  route_rank            0.02 ms
+  eamc_cosine           0.00 ms
+  eamc_materialize      0.00 ms
+  eamc_rows_scored       0.0 rows/token
+  eamc_cache_hits       0.00 hits/token
+  eamc_cache_misses     0.00 misses/token
+  request_end           0.50 ms
+  predictor_end         0.00 ms
+  predictor_save        0.00 ms
+  profile_flush         0.00 ms
+  sidecar_written       0.00 MB/token
+  empty_admit          74.47 experts/token
+  victim_admit         19.06 experts/token
+  scratch               2.91 experts/token
+
+I/O breakdown (decode, mean per token):
+  ssd_read          33.24 ms
+  h2d               25.02 ms
+  host_lookup        0.00 ms
+  host_fill          0.00 ms
+  host_memcpy        0.00 ms
+  staging_wait       0.00 ms
+  gpu_compute        7.93 ms
+  stall (overlap loss)     9.48 ms
+  predictor          0.07 ms
+
+Profiler breakdown (decode, mean per token):
+  predictor_observe     0.00 ms
+  predictor_score       0.07 ms
+  callback_wall        42.30 ms
+  topk_d2h              0.29 ms
+  slot_ids_h2d          0.60 ms
+  slot_table_h2d        0.00 ms
+  route_rank            0.01 ms
+  eamc_cosine           0.00 ms
+  eamc_materialize      0.00 ms
+  eamc_rows_scored       0.0 rows/token
+  eamc_cache_hits       0.00 hits/token
+  eamc_cache_misses     0.00 misses/token
+  request_end           0.48 ms
+  predictor_end         0.00 ms
+  predictor_save        0.00 ms
+  profile_flush         0.02 ms
+  sidecar_written       0.00 MB/token
+  empty_admit           1.06 experts/token
+  victim_admit         65.31 experts/token
+  scratch               0.00 experts/token
+
+Wall/profile reconciliation (decode):
+  wall_decode_us        883616
+  profiled_decode_us    1219468
+  unattributed_decode_us -335852
+
+VRAM peak (process approx): 8.77 GB / 44.39 GB  (baseline-adjusted; experts budget: 5.86 GB, non-expert/process overhead: 2.91 GB)
+VRAM device used: baseline=0.29 GB, peak=9.06 GB  (whole visible GPU(s), includes other processes)
+DRAM peak (process): 1.26 GB
+DRAM RSS (process): 1.26 GB
+DRAM locked (process): 0.00 GB
+Host cache: mode=off preload=none capacity=0.00 GB data=0.00 GB
+Host cache ready: blobs=0/0 after_prefill=0.00 GB after_decode=0.00 GB
+Host cache access: hits=0 misses=0 hit_rate=0.00%
+Host cache preload: alloc=0.00 ms read=0.00 ms total=0.00 ms bytes=0.00 GB
+Host cache verification: verified=0 failures=0
+Host cache transfer: memcpy=0.00 GB h2d=7.37 GB
+Source bytes read (total): 7.37 GB
+SSD reads: 3186 (avg 0.61 MB each, avg latency 0.17 ms)
+profile rows: prefill=80 decode=640
+Page cache policy: hot
+Page cache prepare: time=2675.8200 ms attempts=1 bytes_read=22135021024
+Page cache resident bytes: before=22135021024 after_prepare=22135021024 after_model_load=22135021024 after_prefill=22135021024 after_decode=22135021024 total=22135021024
+Page cache resident pct: before=100.0000 after_prepare=100.0000 after_model_load=100.0000 after_prefill=100.0000 after_decode=100.0000
+Page cache sample valid: before=1 after_prepare=1 after_model_load=1 after_prefill=1 after_decode=1
+Process IO read_bytes: prepare=0 model_init=0 prefill=0 decode=0 total=0
+Process IO rchar: prepare=22135021120 model_init=2866658535 prefill=5912823610 decode=2033554181 total=32948057446
+Process IO sample valid: start=1 after_prepare=1 after_model_load=1 after_prefill=1 after_decode=1
+Page cache timing: prepare_ms=2675.8200 model_init_ms=7692.2544 process_start_to_prefill_end_ms=11665.2913

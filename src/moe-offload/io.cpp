@@ -191,8 +191,11 @@ struct io_worker {
 
             while (queue.pop(req)) {
                 req.host_src = nullptr;
+                req.host_cache_lease = 0;
                 req.host_cache_hit = false;
                 req.host_cache_miss = false;
+                req.host_cache_admitted = false;
+                req.host_cache_bypassed = false;
                 req.host_cache_lookup_us = 0;
                 req.host_cache_fill_us = 0;
                 req.host_memcpy_us = 0;
@@ -205,6 +208,8 @@ struct io_worker {
                             (uint32_t) req.expert,
                             (expert_kind) req.kind,
                             fp,
+                            req.host_cache_admit,
+                            req.host_cache_heat,
                             access)) {
                         req.ok = false;
                         req.io_error = errno;
@@ -214,12 +219,15 @@ struct io_worker {
                     }
                     req.host_cache_hit = access.hit;
                     req.host_cache_miss = access.miss;
+                    req.host_cache_admitted = access.admitted;
+                    req.host_cache_bypassed = access.bypassed;
+                    req.host_cache_lease = access.lease;
                     req.host_cache_lookup_us = access.lookup_us;
                     req.host_cache_fill_us = access.fill_us;
                     req.ssd_read_us = access.source_read_us;
                     req.bytes_read = access.source_bytes;
                     req.host_src = access.data;
-                    if (!pinned_host_cache) {
+                    if (access.data && !pinned_host_cache) {
                         if (!req.pinned_buf) {
                             req.ok = false;
                             req.io_error = EINVAL;
@@ -235,7 +243,15 @@ struct io_worker {
                         req.host_memcpy_bytes = req.blob_size;
                         req.host_src = req.pinned_buf;
                     }
-                } else {
+                }
+                if (!req.host_src) {
+                    if (!req.pinned_buf) {
+                        req.ok = false;
+                        req.io_error = EINVAL;
+                        done.push(req);
+                        outstanding.fetch_sub(1, std::memory_order_release);
+                        continue;
+                    }
                     const auto read_start = std::chrono::steady_clock::now();
                     int rc = moe_io_fseek(fp, (int64_t) req.file_offset, SEEK_SET);
                     if (rc != 0) {

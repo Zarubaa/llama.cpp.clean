@@ -1,0 +1,3 @@
+Process IO read_bytes: prepare=36864 model_init=0 prefill=0 decode=0 total=36864
+Process IO rchar: prepare=22135021120 model_init=2866658035 prefill=16463849214 decode=99907042406 total=141372570775
+Process IO sample valid: start=1 after_prepare=1 after_model_load=1 after_prefill=1 after_decode=1

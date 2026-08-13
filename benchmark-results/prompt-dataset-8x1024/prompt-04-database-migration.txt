@@ -1,0 +1,19 @@
+这是一份在线数据库迁移的复盘材料。业务系统保存订单、库存和支付状态，主表有两百亿行，最近六个月新增了一个 region 字段。原来的索引只按 customer_id 排序，新的查询则经常按 region、created_at 和状态组合过滤。团队决定在不停止写入的情况下建立复合索引，并使用 change-data-capture 将旧表的更新同步到一组 shadow partitions。迁移期间，应用必须继续提供读写服务，且支付确认接口的 p99 延迟不能超过 400 ms。
+
+第一阶段是 schema 变更。数据库先创建 metadata-only 的列定义，然后为每个分区生成索引构建任务。构建任务以低优先级运行，但它会扫描冷数据并把大量索引页读入操作系统 page cache。凌晨的监控显示磁盘吞吐只有 900 MB/s，buffer pool 命中率从 96% 下降到 81%，API 端的锁等待却没有增加。进一步分析发现，真正的竞争不是 SQL lock，而是 page cache 与数据库 buffer pool 争抢同一批 DRAM 页面。
+
+第二阶段启用 CDC。主库将 WAL segment 发送给解析器，解析器把变更写入 Kafka，再由 shadow writer 按主键顺序应用。正常情况下，CDC lag 小于 2 秒；当某个分区的索引构建落后时，shadow writer 会积累大量随机写。一次故障中，Kafka lag 达到 18 分钟，应用仍然从主库读取旧索引，于是用户看到的库存信息和支付服务的实时余额出现短暂不一致。没有数据丢失，但运维团队不得不暂停新的订单写入。
+
+回滚过程暴露出另一个问题。删除半成品索引并不会立刻释放文件系统空间，后台 compaction 仍然持有旧文件的 file descriptor。fincore 显示旧文件的页仍然驻留，新的索引扫描继续触发 direct read。工程师最初尝试执行全局 drop_caches，结果让同一台机器上的日志分析任务同时出现大量 page fault。正确做法应该是先停止构建 worker，等待 fd 引用归零，再对指定文件使用 fadvise，并记录每个阶段的 read_bytes 和 block-device sectors。
+
+迁移设计需要同时考虑数据库内部 cache、Linux page cache 和应用层 result cache。数据库 buffer pool 保存经过解析的 page，page cache 保存文件系统页，result cache 保存查询结果，三者的淘汰依据和一致性语义不同。不能因为 page cache 命中就推断 SQL 查询不需要 CPU；也不能因为 result cache 命中就跳过支付状态的 freshness 检查。对于索引构建，最有效的优化可能不是扩大 DRAM，而是让扫描顺序与磁盘布局匹配，并限制后台 worker 的 read-ahead。
+
+下一次演练要求记录迁移前、索引构建中、CDC 追赶中和回滚后的四个快照。指标包括 page-cache resident percentage、buffer-pool hit ratio、WAL throughput、CDC lag、随机读 IOPS、p95 API latency 和主机可用内存。每个快照都要保存版本号和时间戳，不能只在报告中写一个最终平均值。测试数据要包括热点客户、低频客户、新增 region 以及跨区域查询，以便检查访问分布变化对各级 cache 的影响。
+
+复盘的最终建议是把迁移拆成小批次，并给每个批次设置明确的停止条件：CDC lag 超过五分钟，buffer pool hit ratio 下降十个百分点，或者支付接口 p99 连续三分钟超过阈值时暂停。索引构建应该使用单独的 cgroup 限制 CPU、IOPS 和内存，而不是依赖全局 nice 值。只有这样，团队才能判断一次性能下降究竟来自数据库执行计划、DRAM 争用、page cache 驱逐，还是底层存储队列拥塞。
+迁移团队还需要设计热数据和冷数据的切换实验。热门订单按最近修改时间组织，历史订单按归档月份组织；同一个查询在切换边界可能同时触碰两个分区。缓存条目必须记录 schema version 和 snapshot watermark，不能因为 key 相同就复用过期 page。实验应把 sequential scan、随机 customer lookup、跨 region 聚合和 CDC replay 分开统计，并保存每类访问的 source bytes 与命中率。
+
+数据库管理员提出了一个安全阈值：任何 cache eviction 都不能删除尚未提交事务依赖的页，任何 snapshot 都不能暴露未完成的 shadow write。为此，cache entry 需要 pin count、commit epoch 和 checksum。后台清理线程只能处理 refcount 为零且 epoch 早于当前 watermark 的条目。性能测试必须包括后台清理与前台查询同时运行的情况，因为只有这个重叠场景才能暴露锁竞争和 DRAM 带宽争用。
+
+迁移完成后，团队将用同一份 manifest 重放七天的访问轨迹，并比较 old-index、shadow-index 和 final-index 三个阶段。报告除了延迟，还要列出读放大、写放大、cache fill、eviction、WAL lag 和数据一致性校验结果。任何一个阶段出现 digest 不一致，都应作为正确性失败，而不是把异常请求从性能均值中剔除。
+迁移负责人还会比较 resident set 的三个阶段：构建开始前的自然状态、扫描结束后的污染状态，以及清理线程运行后的恢复状态。每个阶段都要记录文件页驻留、数据库 buffer pool、可用 DRAM 和块设备队列。这样可以验证所谓的 cache warm 是真的命中同一批数据，而不是机器上残留了无关的文件页。

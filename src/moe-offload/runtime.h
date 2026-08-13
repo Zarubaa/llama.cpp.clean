@@ -22,6 +22,11 @@ struct runtime_options {
     std::string profile_summary;
     std::string host_cache = "off";
     std::string host_cache_preload = "none";
+    std::string host_cache_hotset;
+    uint64_t host_cache_capacity_mb = 0;
+    std::string tier_policy = "legacy";
+    uint32_t tier_half_life = 128;
+    bool decode_global_cache = false;
     bool oracle = false;
 };
 

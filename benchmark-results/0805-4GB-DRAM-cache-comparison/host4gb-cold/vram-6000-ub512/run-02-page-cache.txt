@@ -1,0 +1,6 @@
+Page cache policy: hot
+Page cache prepare: time=2675.1770 ms attempts=1 bytes_read=22135021024
+Page cache resident bytes: before=22135021024 after_prepare=22135021024 after_model_load=22135021024 after_prefill=22135021024 after_decode=22135021024 total=22135021024
+Page cache resident pct: before=100.0000 after_prepare=100.0000 after_model_load=100.0000 after_prefill=100.0000 after_decode=100.0000
+Page cache sample valid: before=1 after_prepare=1 after_model_load=1 after_prefill=1 after_decode=1
+Page cache timing: prepare_ms=2675.1770 model_init_ms=9006.8644 process_start_to_prefill_end_ms=18234.9296

@@ -1,0 +1,49 @@
+started=2026-08-06T11:01:14+08:00
+repo=/home/haozhe.lou/llama.cpp.clean
+branch=0804_4GB_DRAM_cache_lhz
+commit=9f0199dbb990e89e600f3dce43629d18ef355bed
+model=/home/haozhe.lou/models/Qwen3.6-35B-A3B-UD-Q4_K_M.moe.gguf
+model_size=22135021024
+model_sha256=4674317e422518acafef023522768e25a42b58e22f960e5a83133bedd0cd14b4
+prompt_file=/home/haozhe.lou/llama.cpp.clean/benchmark-results/new-result/prompts/normal-long-prompt.zh-en.txt
+prompt_sha256=78fd02cac487c229f9e2399ea35905847dd1823a641cca7f762facc714ea1e80
+benchmark_binary=/home/haozhe.lou/llama.cpp.clean/build-moe/bin/llama-moe-bench
+benchmark_sha256=cd9d1fc6269d327f55e58c1574074ed5e4601640c3c3a19e5018066fc2a3cad1
+gpu_index=2
+cpu_list=32-63,96-127
+pp=1024
+tg=1024
+runs_per_cell=3
+git_status_begin
+ M common/arg.cpp
+ M common/common.cpp
+ M common/common.h
+ M include/llama.h
+ M src/llama-model.cpp
+ M src/moe-offload/host_cache.cpp
+ M src/moe-offload/host_cache.h
+ M src/moe-offload/io.cpp
+ M src/moe-offload/io.h
+ M src/moe-offload/loader.cpp
+ M src/moe-offload/profiler.cpp
+ M src/moe-offload/profiler.h
+ M src/moe-offload/runtime.h
+ M src/moe-offload/slot_pool.cpp
+ M src/moe-offload/slot_pool.h
+ M tests/test-moe-host-cache.cpp
+ M tools/moe-bench/main.cpp
+?? benchmark-results/0805-4GB-DRAM-cache-comparison/
+?? "benchmark-results/08064GB DRAM cache/"
+?? "benchmark-results/0806Full DRAM cache/"
+git_status_end
+2, GPU-226cd657-ae0e-e610-1f3d-8d64d2600d73, NVIDIA L20, 00000000:98:00.0, 46068 MiB, 575.64.03
+CPU(s):                                  128
+On-line CPU(s) list:                     0-127
+Model name:                              INTEL(R) XEON(R) GOLD 6530
+NUMA node(s):                            2
+NUMA node0 CPU(s):                       0-31,64-95
+NUMA node1 CPU(s):                       32-63,96-127
+               total        used        free      shared  buff/cache   available
+Mem:     540686942208 20282380288 18259263488     5799936 502145298432 516856082432
+Swap:     8589930496    60817408  8529113088
+completed=2026-08-06T12:25:18+08:00

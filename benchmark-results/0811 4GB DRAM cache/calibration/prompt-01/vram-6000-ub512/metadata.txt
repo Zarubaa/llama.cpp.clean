@@ -1,0 +1,6 @@
+prompt_id=01
+vram_cache_mb=6000
+ubatch=512
+prompt_file=/home/haozhe.lou/llama.cpp.clean/benchmark-results/prompt-dataset-8x1024/prompt-01-storage-incident.txt
+prompt_sha256=c7bb0cd647f7d6af30f97558f0fbc430637571a9ceeb4e11ba50ef6d61704143
+command=taskset -c 0-31\,64-95 env CUDA_VISIBLE_DEVICES=1 /home/haozhe.lou/llama.cpp.clean/build-moe/bin/llama-moe-bench --model /home/haozhe.lou/models/Qwen3.6-35B-A3B-UD-Q4_K_M.moe.gguf --prompt-file /home/haozhe.lou/llama.cpp.clean/benchmark-results/prompt-dataset-8x1024/prompt-01-storage-incident.txt -ngl 99 -c 4096 --pp 1024 --tg 1024 --repeat 1 -ub 512 --moe-cache-vram-mb 6000 --moe-predictor lru --moe-host-cache off --moe-host-cache-preload none --moe-tier-policy legacy --moe-decode-global-cache off --page-cache-policy hot --moe-heat-output /home/haozhe.lou/llama.cpp.clean/benchmark-results/0811\ 4GB\ DRAM\ cache/calibration/prompt-01/vram-6000-ub512/heat-all.tsv --moe-profile-csv /home/haozhe.lou/llama.cpp.clean/benchmark-results/0811\ 4GB\ DRAM\ cache/calibration/prompt-01/vram-6000-ub512/profile.csv --moe-profile-summary /home/haozhe.lou/llama.cpp.clean/benchmark-results/0811\ 4GB\ DRAM\ cache/calibration/prompt-01/vram-6000-ub512/summary.txt --token-trace /home/haozhe.lou/llama.cpp.clean/benchmark-results/0811\ 4GB\ DRAM\ cache/calibration/prompt-01/vram-6000-ub512/tokens.csv 

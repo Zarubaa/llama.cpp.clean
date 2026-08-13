@@ -1,0 +1,21 @@
+一个大型编译基础设施团队正在重写单体构建系统。仓库包含 C++、Rust、CUDA 和 Python 组件，生成物总计超过 18 TB，依赖图每天变化数百万次。旧系统把所有中间产物放在共享 NFS，开发者在提交小改动后经常等待二十分钟才能得到测试结果。新系统准备把不可变 artifact 放在对象存储，把编译 worker 的热输入放在本地 NVMe，并在 host DRAM 中保存最近使用的 precompiled header、CUDA fatbin 和链接器索引。
+
+第一个试验是依赖图切分。构建调度器把任务分为 parse、compile、link、test 四种类型，每类任务有不同的 CPU、内存和 IO 需求。parse 阶段读取大量小源文件，compile 阶段会反复访问头文件，link 阶段需要低延迟的随机读取，test 阶段则产生大量日志。若所有任务共享一个 LRU，测试日志可能把编译器缓存逐出；若每类任务拥有独立 cache，又会造成容量碎片和低利用率。
+
+第二个试验是远程缓存一致性。每个 artifact 的 key 由源码 digest、编译器版本、target triple、feature flags 和环境变量组成。曾经有一次 build green 但运行时崩溃，原因是 cache key 漏掉了 CUDA driver minor version。之后团队增加了 manifest schema、producer identity 和签名校验。缓存命中只能说明找到相同 key，不能说明 artifact 在当前机器的 ABI、GPU compute capability 和运行时库上可执行。
+
+本地 worker 的内存路径也需要测量。源文件从 page cache 读入解析器，生成的 token stream 写入 pageable memory，随后复制到 pinned staging，再由 GPU 执行部分静态分析。另一条路径把频繁使用的索引预加载到 pinned DRAM，直接发起异步 H2D。两条路径的逻辑字节数可能一样，但 read_bytes、host memcpy、H2D 和 compute overlap 不一样。测试工具必须记录每个阶段的开始和结束，而不是只打印整个 build 的 wall time。
+
+编译任务有明显的工作集变化。上午的增量构建集中在少数服务目录，下午的全量 release build 会遍历所有模块。一个在上午表现良好的 hotset 到下午可能完全不适用。团队计划使用 two-queue cache：新加入的 artifact 先进入 probation，短时间内再次命中才进入 protected；大型 artifact 可以按照 size-aware cost 计算分数，避免一个罕见的巨型文件长期占据缓存。淘汰时必须确认没有活动的 compiler process 持有 mmap，也不能删除仍被 linker 使用的临时文件。
+
+验证矩阵包括 clean build、incremental build、CUDA-only build、跨架构交叉编译和失败后重试。每个场景都有独立的自然输入，包括源码变更、依赖更新和环境差异。模式比较必须配对相同的 commit manifest，并记录 cache hit、miss、fill、eviction、source read、page residency、RSS 和最终产物 digest。错误输出的 hash 不一致时，性能数字全部作废。
+
+基础设施负责人希望最终答案不是“扩大缓存”。报告需要回答四个问题：哪个 artifact 类别最适合 host DRAM，GPU 上的临时编译任务是否真的受益于 pinned memory，page cache 的自然回收是否会破坏远程缓存收益，以及何时应该牺牲命中率来保护尾延迟。只有把 warmup、steady state 和工作集切换分别测量，才可以决定缓存预算应该按平均工作集还是按峰值工作集分配。
+构建系统还必须面对编译器版本切换。clang 版本、CUDA toolkit、链接器和 libc++ 任一变化都可能使旧 artifact 不可复用，即使源代码 digest 没有改变。manifest 因此需要保存 toolchain digest、sysroot、target architecture 和 feature set。测试时要把 cache hit 分成 exact hit、compatible hit 和 rejected hit，rejected artifact 不能计入命中率。
+
+为了测量真实尾延迟，调度器会在增量构建中插入依赖图变更、头文件触碰和失败重试。每次变更都写入一个不可变 workload manifest，模式之间使用同一个 manifest。运行器应保存 queue wait、cache lookup、source read、host memcpy、H2D、compile compute 和 artifact publish 时间，并且把失败任务的 stdout/stderr 和退出码完整保留。
+
+最后，构建团队计划以两个阶段上线。第一阶段只启用 pageable host cache 和小型 pinned staging，验证一致性和容量；第二阶段才评估有限 pinned hotset。若 pinned hotset 的额外收益不足以覆盖锁页额度、NUMA 约束和回收复杂度，就维持第一阶段方案。这个决定必须基于多个不同工作集，而不是某一个上午的增量构建。
+工程师还会检查符号和路径的极端情况：同名头文件来自不同 sysroot、生成代码带有绝对路径、链接器响应文件超过单次 argv 限制，以及不同架构的 fatbin 共用一个 cache key。每种情况都要有清晰的 reject reason，并且不能让无效 artifact 进入 protected 队列。测试报告同时记录 cache lookup 的 CPU 时间和实际编译时间，避免把快速失败误报成高吞吐。
+
+工作集切换实验会在增量构建和全量构建之间交替进行。切换后先观察五分钟自然淘汰，再观察一次显式 warmup；warmup 时间单独记录，不能混入 steady-state。若 host DRAM cache 对工作集切换帮助有限，系统应优先扩大 GPU 可复用的 staging 并发，而不是盲目锁住更多页面。

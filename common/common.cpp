@@ -1573,6 +1573,11 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
     mparams.moe_profile_summary = params.moe_profile_summary.empty() ? nullptr : params.moe_profile_summary.c_str();
     mparams.moe_host_cache      = params.moe_host_cache.c_str();
     mparams.moe_host_cache_preload = params.moe_host_cache_preload.c_str();
+    mparams.moe_host_cache_hotset = params.moe_host_cache_hotset.empty() ? nullptr : params.moe_host_cache_hotset.c_str();
+    mparams.moe_host_cache_capacity_mb = params.moe_host_cache_capacity_mb < 0 ? 0 : (uint64_t) params.moe_host_cache_capacity_mb;
+    mparams.moe_tier_policy = params.moe_tier_policy.c_str();
+    mparams.moe_tier_half_life = params.moe_tier_half_life < 1 ? 1u : (uint32_t) params.moe_tier_half_life;
+    mparams.moe_decode_global_cache = params.moe_decode_global_cache;
     mparams.moe_cache_vram_mb   = params.moe_cache_vram_mb < 0 ? 0 : (uint64_t) params.moe_cache_vram_mb;
     mparams.moe_cache_vram_frac = params.moe_cache_vram_frac;
     mparams.moe_offload         = params.moe_offload;

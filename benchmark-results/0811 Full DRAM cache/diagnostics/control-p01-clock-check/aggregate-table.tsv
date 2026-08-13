@@ -1,0 +1,2 @@
+mode	vram_cache_mb	ubatch	prompt_count	prefill_tok_s_mean	prefill_tok_s_median	prefill_tok_s_stdev	prefill_tok_s_min	prefill_tok_s_max	decode_tok_s_mean	decode_tok_s_median	decode_tok_s_stdev	decode_tok_s_min	decode_tok_s_max	tpot_ms_mean	tpot_ms_median	tpot_ms_stdev	tpot_ms_min	tpot_ms_max
+control-original	6000	512	1	187.18974829275083	187.18974829275083	0.0	187.18974829275083	187.18974829275083	15.102388792143024	15.102388792143024	0.0	15.102388792143024	15.102388792143024	66.22	66.22	0.0	66.22	66.22

@@ -203,18 +203,31 @@ bool configure_from_params(
     opts.profile_summary = params.moe_profile_summary ? params.moe_profile_summary : "";
     opts.host_cache = params.moe_host_cache ? params.moe_host_cache : "off";
     opts.host_cache_preload = params.moe_host_cache_preload ? params.moe_host_cache_preload : "none";
+    opts.host_cache_hotset = params.moe_host_cache_hotset ? params.moe_host_cache_hotset : "";
+    opts.host_cache_capacity_mb = params.moe_host_cache_capacity_mb;
+    opts.tier_policy = params.moe_tier_policy ? params.moe_tier_policy : "legacy";
+    opts.tier_half_life = params.moe_tier_half_life > 0 ? params.moe_tier_half_life : 128;
+    opts.decode_global_cache = params.moe_decode_global_cache;
     opts.oracle = params.moe_oracle;
 
     if (opts.host_cache != "off" && opts.host_cache != "pageable" && opts.host_cache != "pinned") {
         LLAMA_LOG_ERROR("%s: invalid --moe-host-cache value: %s\n", __func__, opts.host_cache.c_str());
         return false;
     }
-    if (opts.host_cache_preload != "none" && opts.host_cache_preload != "all") {
+    if (opts.host_cache_preload != "none" && opts.host_cache_preload != "all" && opts.host_cache_preload != "hotset") {
         LLAMA_LOG_ERROR("%s: invalid --moe-host-cache-preload value: %s\n", __func__, opts.host_cache_preload.c_str());
         return false;
     }
     if (opts.host_cache == "off" && opts.host_cache_preload != "none") {
         LLAMA_LOG_ERROR("%s: --moe-host-cache-preload=all requires pageable or pinned host cache\n", __func__);
+        return false;
+    }
+    if (opts.host_cache_preload == "hotset" && opts.host_cache_hotset.empty()) {
+        LLAMA_LOG_ERROR("%s: --moe-host-cache-preload=hotset requires --moe-host-cache-hotset\n", __func__);
+        return false;
+    }
+    if (opts.tier_policy != "legacy" && opts.tier_policy != "aged-lfu") {
+        LLAMA_LOG_ERROR("%s: invalid --moe-tier-policy value: %s\n", __func__, opts.tier_policy.c_str());
         return false;
     }
 
@@ -227,7 +240,8 @@ bool configure_from_params(
 
     configure_runtime(opts, mf);
     configure_slot_pool();
-    if (!host_cache_init(mf, opts.host_cache, opts.host_cache_preload)) {
+    if (!host_cache_init(mf, opts.host_cache, opts.host_cache_preload,
+            opts.host_cache_capacity_mb, opts.host_cache_hotset)) {
         LLAMA_LOG_ERROR("%s: failed to initialize %s host expert cache\n",
                 __func__, opts.host_cache.c_str());
         reset_slot_pool();

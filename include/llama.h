@@ -327,7 +327,11 @@ extern "C" {
         const char * moe_profile_summary;
         const char * moe_host_cache;
         const char * moe_host_cache_preload;
+        const char * moe_host_cache_hotset;
+        const char * moe_tier_policy;
         uint64_t     moe_cache_vram_mb;
+        uint64_t     moe_host_cache_capacity_mb;
+        uint32_t     moe_tier_half_life;
         float        moe_cache_vram_frac;
     #endif
 
@@ -343,6 +347,7 @@ extern "C" {
     #ifdef LLAMA_MOE_OFFLOAD
         bool moe_offload;     // enable SSD-backed MoE expert offloading path
         bool moe_oracle;      // diagnostic oracle mode for profiling overlap cost
+        bool moe_decode_global_cache;
     #endif
     };
 
