@@ -1454,6 +1454,85 @@ ggml_tensor * llm_graph_context::build_lora_mm_id(
     return res;
 }
 
+ggml_tensor * llm_graph_context::build_moe_frobenius_distance_squared(
+          ggml_tensor * cur,
+          ggml_tensor * up_exps,
+          ggml_tensor * gate_exps,
+          ggml_tensor * down_exps,
+              int64_t   n_expert,
+                 int   il,
+          ggml_tensor * gate_up_exps,
+          ggml_tensor * up_exps_s,
+          ggml_tensor * gate_exps_s,
+          ggml_tensor * down_exps_s) const {
+    GGML_ASSERT(cur != nullptr);
+    GGML_ASSERT(down_exps != nullptr);
+    GGML_ASSERT(n_expert > 0 && n_expert <= LLAMA_MAX_EXPERTS);
+
+    const int64_t n_embd   = cur->ne[0];
+    const int64_t n_tokens = cur->ne[1];
+
+    // ids[e, t] = e makes MUL_MAT_ID evaluate every expert for every token.
+    // The weights stay quantized and are consumed by the normal GGML backend
+    // kernels; this path does not dequantize a complete expert tensor.
+    ggml_tensor * ids = ggml_arange(ctx0, 0.0f, (float) n_expert, 1.0f);
+    ids = ggml_cast(ctx0, ids, GGML_TYPE_I32);
+    ids = ggml_reshape_2d(ctx0, ids, n_expert, 1);
+    ids = ggml_repeat_4d(ctx0, ids, n_expert, n_tokens, 1, 1);
+    cb(ids, "sere_calibration_all_expert_ids", il);
+
+    ggml_tensor * expert_input = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
+    ggml_tensor * gate = nullptr;
+    ggml_tensor * up   = nullptr;
+
+    if (gate_up_exps != nullptr) {
+        ggml_tensor * gate_up = build_lora_mm_id(gate_up_exps, expert_input, ids, up_exps_s);
+        const int64_t n_ff = gate_up->ne[0] / 2;
+        gate = ggml_view_3d(ctx0, gate_up, n_ff, n_expert, n_tokens,
+                gate_up->nb[1], gate_up->nb[2], 0);
+        up = ggml_view_3d(ctx0, gate_up, n_ff, n_expert, n_tokens,
+                gate_up->nb[1], gate_up->nb[2], n_ff * gate_up->nb[0]);
+    } else {
+        GGML_ASSERT(up_exps != nullptr);
+        up = build_lora_mm_id(up_exps, expert_input, ids, up_exps_s);
+        gate = gate_exps != nullptr
+            ? build_lora_mm_id(gate_exps, expert_input, ids, gate_exps_s)
+            : up;
+    }
+
+    ggml_tensor * activated = (gate_exps != nullptr || gate_up_exps != nullptr)
+        ? ggml_swiglu_split(ctx0, gate, up)
+        : ggml_silu(ctx0, gate);
+    ggml_tensor * outputs = build_lora_mm_id(down_exps, activated, ids, down_exps_s);
+    cb(outputs, "sere_calibration_all_expert_outputs", il);
+
+    GGML_ASSERT(outputs->ne[0] == n_embd);
+    GGML_ASSERT(outputs->ne[1] == n_expert);
+    GGML_ASSERT(outputs->ne[2] == n_tokens);
+
+    // outputs is [hidden, expert, token]. Reorder it to
+    // [hidden * token, expert], then use
+    // ||x_i-x_j||^2 = ||x_i||^2 + ||x_j||^2 - 2 x_i^T x_j.
+    // This avoids copying O(expert * token * hidden) data back to the host.
+    ggml_tensor * flattened = ggml_permute(ctx0, outputs, 0, 2, 1, 3);
+    flattened = ggml_cont(ctx0, flattened);
+    flattened = ggml_reshape_2d(ctx0, flattened, outputs->ne[0] * n_tokens, n_expert);
+
+    ggml_tensor * norms = ggml_sum_rows(ctx0, ggml_sqr(ctx0, flattened)); // [1, expert]
+    ggml_tensor * norm_rows = ggml_repeat_4d(ctx0, norms, n_expert, n_expert, 1, 1);
+    ggml_tensor * gram = ggml_mul_mat(ctx0, flattened, flattened);
+    ggml_mul_mat_set_prec(gram, GGML_PREC_F32);
+
+    ggml_tensor * distances = ggml_sub(ctx0,
+            ggml_add(ctx0, norm_rows, ggml_transpose(ctx0, norm_rows)),
+            ggml_scale(ctx0, gram, 2.0f));
+    cb(distances, "sere_calibration_frobenius_distance_squared_unclamped", il);
+    distances = ggml_clamp(ctx0, distances, 0.0f, INFINITY);
+    cb(distances, "sere_calibration_frobenius_distance_squared", il);
+    ggml_build_forward_expand(gf, distances);
+    return distances;
+}
+
 ggml_tensor * llm_graph_context::build_norm(
          ggml_tensor * cur,
          ggml_tensor * mw,

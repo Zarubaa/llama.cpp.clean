@@ -1,6 +1,31 @@
 #include "models.h"
 #include "llama-memory-recurrent.h"
 
+#include <cerrno>
+#include <cstring>
+#include <cstdlib>
+
+namespace {
+
+bool qwen35moe_sere_calibration_layer_enabled(int il) {
+    const char * enabled = std::getenv("LLAMA_SERE_CALIBRATION_Q4");
+    if (enabled == nullptr || enabled[0] == '\0' || std::strcmp(enabled, "0") == 0) {
+        return false;
+    }
+
+    const char * selected = std::getenv("LLAMA_SERE_CALIBRATION_LAYER");
+    if (selected == nullptr || selected[0] == '\0' || std::strcmp(selected, "all") == 0) {
+        return true;
+    }
+
+    errno = 0;
+    char * end = nullptr;
+    const long parsed = std::strtol(selected, &end, 10);
+    return errno == 0 && end != selected && *end == '\0' && parsed == il;
+}
+
+} // namespace
+
 void llama_model_qwen35moe::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_EXPERT_FEED_FORWARD_LENGTH,        hparams.n_ff_exp, false);
     ml.get_key(LLM_KV_EXPERT_SHARED_FEED_FORWARD_LENGTH, hparams.n_ff_shexp, false);
@@ -212,6 +237,20 @@ llama_model_qwen35moe::graph::graph(const llama_model & model, const llm_graph_p
         // Post-attention norm
         ggml_tensor * attn_post_norm = build_norm(cur, model.layers[il].attn_post_norm, nullptr, LLM_NORM_RMS, il);
         cb(attn_post_norm, "attn_post_norm", il);
+
+        if (qwen35moe_sere_calibration_layer_enabled(il)) {
+            build_moe_frobenius_distance_squared(
+                    attn_post_norm,
+                    model.layers[il].ffn_up_exps,
+                    model.layers[il].ffn_gate_exps,
+                    model.layers[il].ffn_down_exps,
+                    n_expert,
+                    il,
+                    model.layers[il].ffn_gate_up_exps,
+                    model.layers[il].ffn_up_exps_s,
+                    model.layers[il].ffn_gate_exps_s,
+                    model.layers[il].ffn_down_exps_s);
+        }
 
         // MOE FFN layer
         cur = build_layer_ffn(attn_post_norm, il);

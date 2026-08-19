@@ -960,6 +960,21 @@ struct llm_graph_context {
               ggml_tensor * ids,
               ggml_tensor * w_s = nullptr) const;
 
+    // Calibration-only path used to measure all routed experts on the same
+    // hidden states. The returned tensor is [n_expert, n_expert] and contains
+    // squared Frobenius distances between unweighted expert outputs.
+    ggml_tensor * build_moe_frobenius_distance_squared(
+              ggml_tensor * cur,
+              ggml_tensor * up_exps,
+              ggml_tensor * gate_exps,
+              ggml_tensor * down_exps,
+                  int64_t   n_expert,
+                     int   il,
+              ggml_tensor * gate_up_exps = nullptr,
+              ggml_tensor * up_exps_s = nullptr,
+              ggml_tensor * gate_exps_s = nullptr,
+              ggml_tensor * down_exps_s = nullptr) const;
+
     ggml_tensor * build_norm(
              ggml_tensor * cur,
              ggml_tensor * mw,
